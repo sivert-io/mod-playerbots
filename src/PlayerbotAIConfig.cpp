@@ -777,6 +777,10 @@ bool PlayerbotAIConfig::Initialize()
     RpgStatusProbWeight[RPG_TRAVEL_FLIGHT] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.TravelFlight", 15);
     RpgStatusProbWeight[RPG_REST] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.Rest", 5);
     RpgStatusProbWeight[RPG_OUTDOOR_PVP] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.OutdoorPvp", 10);
+    RpgStatusProbWeight[RPG_SOCIAL_AFK] = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgStatusProbWeight.SocialAfk", 0);
+    rpgSocialAfkMinTime = sConfigMgr->GetOption<int32>("AiPlayerbot.RpgSocialAfk.MinTime", 5 * MINUTE);
+    rpgSocialAfkMaxTime = std::max(rpgSocialAfkMinTime,
+        (uint32)sConfigMgr->GetOption<int32>("AiPlayerbot.RpgSocialAfk.MaxTime", 30 * MINUTE));
 
     syncLevelWithPlayers = sConfigMgr->GetOption<bool>("AiPlayerbot.SyncLevelWithPlayers", false);
     randomBotConcentrateInPlayerZone =

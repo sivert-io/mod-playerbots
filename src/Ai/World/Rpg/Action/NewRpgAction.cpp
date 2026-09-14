@@ -164,6 +164,22 @@ bool TellRpgStatusAction::Execute(Event event)
         WhisperStatusChange(owner, "OUTDOOR_PVP");
         return true;
     }
+    else if (status == RPG_SOCIAL_AFK)
+    {
+        WorldPosition pos = SelectSocialHubPos(bot);
+        if (pos == WorldPosition())
+        {
+            std::string msg = PlayerbotTextMgr::instance().GetBotTextOrDefault(
+                "rpg_no_social_hub_error", "No inn or city nearby.", {});
+            bot->Whisper(msg, LANG_UNIVERSAL, owner);
+            return false;
+        }
+        info.ChangeToSocialAfk(
+            pos, urand(sPlayerbotAIConfig.rpgSocialAfkMinTime, sPlayerbotAIConfig.rpgSocialAfkMaxTime) *
+                     IN_MILLISECONDS);
+        WhisperStatusChange(owner, "SOCIAL_AFK");
+        return true;
+    }
     else if (status == RPG_DO_QUEST)
     {
         if (!questId)
@@ -206,7 +222,7 @@ bool TellRpgStatusAction::Execute(Event event)
     std::string msg = PlayerbotTextMgr::instance().GetBotTextOrDefault(
         "rpg_unknown_status_error",
         "Unknown rpg status. Options: idle, rest, wander random, wander npc, "
-        "go grind, go camp, do quest [<id>], travel flight, outdoor pvp.", {});
+        "go grind, go camp, do quest [<id>], travel flight, outdoor pvp, social afk.", {});
     bot->Whisper(msg, LANG_UNIVERSAL, owner);
     return false;
 }
@@ -235,11 +251,16 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
 {
     NewRpgInfo& info = botAI->rpgInfo;
     NewRpgStatus status = info.GetStatus();
+
+    // Leftover AFK flag from an interrupted social break
+    if (status != RPG_SOCIAL_AFK && bot->isAFK())
+        bot->RemovePlayerFlag(PLAYER_FLAGS_AFK);
+
     switch (status)
     {
         case RPG_IDLE:
             return RandomChangeStatus({RPG_GO_CAMP, RPG_GO_GRIND, RPG_WANDER_RANDOM, RPG_WANDER_NPC, RPG_DO_QUEST,
-                                       RPG_TRAVEL_FLIGHT, RPG_REST, RPG_OUTDOOR_PVP});
+                                       RPG_TRAVEL_FLIGHT, RPG_REST, RPG_OUTDOOR_PVP, RPG_SOCIAL_AFK});
 
         case RPG_GO_GRIND:
         {
@@ -321,6 +342,40 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
         {
             if (info.HasStatusPersisted(statusOutDoorPvPDuration))
             {
+                info.ChangeToIdle();
+                return true;
+            }
+            break;
+        }
+        case RPG_SOCIAL_AFK:
+        {
+            auto& data = std::get<NewRpgInfo::SocialAfk>(info.data);
+            if (!data.arrivedT)
+            {
+                // SOCIAL_AFK (travelling) -> AFK at the hub
+                if (bot->GetMapId() == data.pos.GetMapId() && bot->GetExactDist(data.pos) < 10.0f)
+                {
+                    data.arrivedT = getMSTime();
+                    data.nextEmoteT = getMSTime() + urand(30, 120) * IN_MILLISECONDS;
+                    bot->StopMoving();
+                    bot->SetPlayerFlag(PLAYER_FLAGS_AFK);
+                    if (urand(0, 1))
+                        bot->SetStandState(UNIT_STAND_STATE_SIT);
+                    return true;
+                }
+                // Could not get there in time -> IDLE
+                if (info.HasStatusPersisted(statusSocialAfkTravelDuration) || bot->GetGroup())
+                {
+                    info.ChangeToIdle();
+                    return true;
+                }
+                break;
+            }
+            // SOCIAL_AFK -> IDLE when the break is over or someone grouped the bot
+            if (GetMSTimeDiffToNow(data.arrivedT) > data.duration || bot->GetGroup())
+            {
+                bot->RemovePlayerFlag(PLAYER_FLAGS_AFK);
+                bot->SetStandState(UNIT_STAND_STATE_STAND);
                 info.ChangeToIdle();
                 return true;
             }
@@ -421,6 +476,33 @@ bool NewRpgWanderNpcAction::Execute(Event /*event*/)
         return MoveRandomNear(15.0f);
     }
 
+    return true;
+}
+
+bool NewRpgSocialAfkAction::Execute(Event /*event*/)
+{
+    auto* data = std::get_if<NewRpgInfo::SocialAfk>(&botAI->rpgInfo.data);
+    if (!data)
+        return false;
+
+    if (!data->arrivedT)
+    {
+        if (MoveFarTo(data->pos))
+            return true;
+        return MoveRandomNear(10.0f);
+    }
+
+    // Idle at the hub; now and then do something a player chatting at the inn would do
+    if (getMSTime() < data->nextEmoteT)
+        return false;
+
+    data->nextEmoteT = getMSTime() + urand(60, 240) * IN_MILLISECONDS;
+    if (bot->IsSitState())
+        return false;
+
+    static uint32 const emotes[] = {EMOTE_ONESHOT_TALK, EMOTE_ONESHOT_LAUGH, EMOTE_ONESHOT_NO,
+                                    EMOTE_ONESHOT_YES,  EMOTE_ONESHOT_CHEER, EMOTE_ONESHOT_EXCLAMATION};
+    bot->HandleEmoteCommand(emotes[urand(0, std::size(emotes) - 1)]);
     return true;
 }
 

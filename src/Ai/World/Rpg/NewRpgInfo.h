@@ -70,6 +70,14 @@ struct NewRpgInfo
     {
         ObjectGuid::LowType capturePointSpawnId{0};
     };
+    // RPG_SOCIAL_AFK
+    struct SocialAfk
+    {
+        WorldPosition pos{};
+        uint32 duration{0};     // ms to stay AFK once arrived
+        uint32 arrivedT{0};     // 0 while still travelling
+        uint32 nextEmoteT{0};
+    };
     struct Idle
     {
     };
@@ -92,7 +100,8 @@ struct NewRpgInfo
         DoQuest,
         Rest,
         TravelFlight,
-        OutdoorPvP
+        OutdoorPvP,
+        SocialAfk
     >;
     RpgData data;
 
@@ -107,6 +116,7 @@ struct NewRpgInfo
     void ChangeToTravelFlight(uint32 flightMasterEntry, WorldPosition flightMasterPos, std::vector<uint32> path);
     void ChangeToOutdoorPvp(ObjectGuid::LowType capturePointSpawnId = 0);
     void ChangeToRest();
+    void ChangeToSocialAfk(WorldPosition pos, uint32 duration);
     void ChangeToIdle();
     bool CanChangeTo(NewRpgStatus status);
     void Reset();

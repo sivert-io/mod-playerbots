@@ -1062,6 +1062,15 @@ WorldPosition NewRpgBaseAction::SelectRandomCampPos(Player* bot)
     return dest;
 }
 
+WorldPosition NewRpgBaseAction::SelectSocialHubPos(Player* bot)
+{
+    std::vector<WorldLocation> locs = sTravelMgr.GetSocialHubLocations(bot, 2500.0f, 1500.0f);
+    if (locs.empty())
+        return WorldPosition();
+
+    return locs[urand(0, locs.size() - 1)];
+}
+
 bool NewRpgBaseAction::SelectRandomFlightTaxiNode(uint32& flightMasterEntry, WorldPosition& flightMasterPos, std::vector<uint32>& path)
 {
     TravelMgr::FlightMasterInfo const* info = sTravelMgr.GetNearestFlightMasterInfo(bot);
@@ -1202,6 +1211,18 @@ bool NewRpgBaseAction::RandomChangeStatus(std::vector<NewRpgStatus> candidateSta
             botAI->rpgInfo.ChangeToOutdoorPvp();
             return true;
         }
+        case RPG_SOCIAL_AFK:
+        {
+            WorldPosition pos = SelectSocialHubPos(bot);
+            if (pos != WorldPosition())
+            {
+                botAI->rpgInfo.ChangeToSocialAfk(
+                    pos, urand(sPlayerbotAIConfig.rpgSocialAfkMinTime, sPlayerbotAIConfig.rpgSocialAfkMaxTime) *
+                             IN_MILLISECONDS);
+                return true;
+            }
+            return false;
+        }
         default:
         {
             botAI->rpgInfo.ChangeToRest();
@@ -1273,6 +1294,13 @@ bool NewRpgBaseAction::CheckRpgStatusAvailable(NewRpgStatus status)
 
             OutdoorPvP* outdoorPvP = sOutdoorPvPMgr->GetOutdoorPvPToZoneId(zoneId);
             return outdoorPvP != nullptr;
+        }
+        case RPG_SOCIAL_AFK:
+        {
+            // Grouped bots keep playing with their group
+            if (bot->GetGroup())
+                return false;
+            return SelectSocialHubPos(bot) != WorldPosition();
         }
         default:
             return false;

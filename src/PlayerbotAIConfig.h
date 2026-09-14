@@ -71,7 +71,9 @@ enum NewRpgStatus : int
     // Taking a break
     RPG_REST = 7,
     RPG_OUTDOOR_PVP = 8,
-    RPG_STATUS_END = 9
+    // Go to an inn or city bank and stay AFK for a while
+    RPG_SOCIAL_AFK = 9,
+    RPG_STATUS_END = 10
 };
 
 #define MAX_SPECNO 20
@@ -322,6 +324,9 @@ public:
     uint32 populationMinSessionTime, populationMaxSessionTime;
     uint32 populationMinOfflineTime, populationMaxOfflineTime;
     float populationChronotypeBias;
+
+    // RPG social AFK break duration (seconds)
+    uint32 rpgSocialAfkMinTime, rpgSocialAfkMaxTime;
 
     // Gradual sign-ups: hold back low level bots and release them over time
     bool signupsEnabled;

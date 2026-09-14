@@ -66,6 +66,15 @@ void NewRpgInfo::ChangeToRest()
     data = Rest{};
 }
 
+void NewRpgInfo::ChangeToSocialAfk(WorldPosition pos, uint32 duration)
+{
+    startT = getMSTime();
+    SocialAfk afk;
+    afk.pos = pos;
+    afk.duration = duration;
+    data = afk;
+}
+
 void NewRpgInfo::ChangeToIdle()
 {
     startT = getMSTime();
@@ -102,6 +111,7 @@ NewRpgStatus NewRpgInfo::StatusFromString(std::string const& name)
     if (name == "do quest")       return RPG_DO_QUEST;
     if (name == "travel flight")  return RPG_TRAVEL_FLIGHT;
     if (name == "outdoor pvp")    return RPG_OUTDOOR_PVP;
+    if (name == "social afk")     return RPG_SOCIAL_AFK;
     return RPG_STATUS_END;
 }
 
@@ -118,6 +128,7 @@ NewRpgStatus NewRpgInfo::GetStatus()
         if constexpr (std::is_same_v<T, DoQuest>) return RPG_DO_QUEST;
         if constexpr (std::is_same_v<T, TravelFlight>) return RPG_TRAVEL_FLIGHT;
         if constexpr (std::is_same_v<T, OutdoorPvP>) return RPG_OUTDOOR_PVP;
+        if constexpr (std::is_same_v<T, SocialAfk>) return RPG_SOCIAL_AFK;
         return RPG_IDLE;
     }, data);
 }
@@ -188,6 +199,14 @@ std::string NewRpgInfo::ToString()
                 out << "\nNo capture point assigned.";
             else
                 out << "\ncapturePointSpawnId: " << arg.capturePointSpawnId;
+        }
+        else if constexpr (std::is_same_v<T, SocialAfk>)
+        {
+            out << "SOCIAL_AFK";
+            out << "\nHubPos: " << arg.pos.GetMapId() << " " << arg.pos.GetPositionX() << " "
+                << arg.pos.GetPositionY() << " " << arg.pos.GetPositionZ();
+            out << "\narrived: " << (arg.arrivedT ? GetMSTimeDiffToNow(arg.arrivedT) / 1000 : 0) << "s of "
+                << arg.duration / 1000 << "s";
         }
         else
             out << "UNKNOWN";

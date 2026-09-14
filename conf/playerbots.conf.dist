@@ -1469,6 +1469,7 @@ AiPlayerbot.EnableNewRpgStrategy = 1
 # TravelFlight  (Default: 15  Go to the nearest flightmaster and fly to a level-appropriate area)
 # Rest          (Default: 5   Take a break for a while and do nothing)
 # OutdoorPvp    (Default: 10  Participate in outdoor PvP capture points if already in an outdoor PvP zone)
+# SocialAfk     (Default: 0   Walk to a nearby inn or friendly city bank (Shattrath/Dalaran at 61+), go AFK and idle there)
 AiPlayerbot.RpgStatusProbWeight.WanderRandom = 15
 AiPlayerbot.RpgStatusProbWeight.WanderNpc = 20
 AiPlayerbot.RpgStatusProbWeight.GoGrind = 15
@@ -1477,6 +1478,12 @@ AiPlayerbot.RpgStatusProbWeight.DoQuest = 60
 AiPlayerbot.RpgStatusProbWeight.TravelFlight = 15
 AiPlayerbot.RpgStatusProbWeight.Rest = 5
 AiPlayerbot.RpgStatusProbWeight.OutdoorPvp = 10
+AiPlayerbot.RpgStatusProbWeight.SocialAfk = 0
+
+# Minimum and maximum seconds a bot stays AFK once it reaches the inn or bank (SocialAfk status)
+# Defaults: 300 (5 min), 1800 (30 min)
+AiPlayerbot.RpgSocialAfk.MinTime = 300
+AiPlayerbot.RpgSocialAfk.MaxTime = 1800
 
 # Bots' minimum and maximum level when teleporting in and out of a zone, according to the new RPG strategy
 # Format: AiPlayerbot.ZoneBracket.zoneID = minLevel,maxLevel

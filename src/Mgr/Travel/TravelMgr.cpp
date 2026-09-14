@@ -4555,6 +4555,34 @@ std::vector<WorldLocation> TravelMgr::GetCityLocations(Player* bot)
     return fallbackLocations;
 }
 
+// Nearby places where players hang out: friendly or neutral capital bankers for the bot's level
+// (base cities, Shattrath 61-70, Dalaran 71+) and level-appropriate inns, on the bot's map.
+std::vector<WorldLocation> TravelMgr::GetSocialHubLocations(Player* bot, float cityRange, float innRange)
+{
+    std::vector<WorldLocation> locs;
+    TeamId team = bot->GetTeamId();
+
+    for (auto const& bLoc : bankerLocsPerLevelCache[bot->GetLevel()])
+    {
+        if (bLoc.loc.GetMapId() != bot->GetMapId() || bot->GetExactDist(bLoc.loc) > cityRange)
+            continue;
+
+        Capital const* capital = FindCapitalByBanker(bLoc.entry);
+        if (!capital || (capital->team != team && capital->team != TEAM_NEUTRAL))
+            continue;
+
+        locs.push_back(bLoc.loc);
+    }
+
+    for (auto const& loc : GetTravelHubs(bot))
+    {
+        if (loc.GetMapId() == bot->GetMapId() && bot->GetExactDist(loc) <= innRange)
+            locs.push_back(loc);
+    }
+
+    return locs;
+}
+
 void TravelMgr::PrepareZone2LevelBracket()
 {
     // Classic WoW - starter zones
