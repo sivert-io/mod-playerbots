@@ -311,6 +311,23 @@ public:
     uint32 randombotStartingLevel;
     bool enablePeriodicOnlineOffline;
     float periodicOnlineOfflineRatio;
+
+    // Population lifecycle: daily online curve, play sessions, offline cooldowns, chronotypes
+    bool populationCurveEnabled;
+    std::vector<std::pair<float, float>> populationCurvePoints;  // (hour of day, % of peak), sorted by hour
+    uint32 populationCurvePeakOnline;
+    int32 populationCurveUtcOffsetMinutes;
+    bool populationCurveEuropeanDst;
+    uint32 populationCurveUpdateInterval;
+    uint32 populationMinSessionTime, populationMaxSessionTime;
+    uint32 populationMinOfflineTime, populationMaxOfflineTime;
+    float populationChronotypeBias;
+
+    // Gradual sign-ups: hold back low level bots and release them over time
+    bool signupsEnabled;
+    uint32 signupsMaxLevel;
+    uint32 signupsPerDay;
+
     bool gearscorecheck;
     bool randomBotPreQuests;
     bool botSendMailEnabled;

@@ -237,6 +237,15 @@ private:
     time_t printStatsTimer;
     uint32 AddRandomBots();
     bool ProcessBot(uint32 bot);
+
+    // Population lifecycle (AiPlayerbot.PopulationCurve.* / AiPlayerbot.Signups.*)
+    uint32 GetPopulationCurveTarget(time_t now) const;
+    static float GetChronotypeWeight(uint32 bot, float localHour);
+    static float GetPopulationLocalHour(time_t now);
+    void InitSignups();
+    bool IsSignupPending(uint32 bot);
+    time_t populationCurveTimer = 0;
+    bool signupsInitialized = false;
     void ScheduleRandomize(uint32 bot, uint32 time);
     void RandomTeleport(Player* bot);
     void RandomTeleport(Player* bot, std::vector<WorldLocation>& locs, bool hearth = false);

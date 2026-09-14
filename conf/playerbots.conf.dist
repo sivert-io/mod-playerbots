@@ -762,6 +762,59 @@ AiPlayerbot.EnablePeriodicOnlineOffline = 0
 # Default: 2.0 (total number of bots is twice the number of MaxRandomBots)
 AiPlayerbot.PeriodicOnlineOfflineRatio = 2.0
 
+# Population curve: randombots log in and out in play sessions so the number online follows a daily
+# curve. The whole pool of existing randombot characters is used (MaxRandomBots stays the pool size and
+# caps the target); EnablePeriodicOnlineOffline is ignored while this is enabled and should stay 0 so
+# no extra accounts are requested. RandomBotCountChange*Interval and Min/MaxRandomBotInWorldTime are
+# not used for randombots while this is enabled.
+# Default: 0 (disabled)
+AiPlayerbot.PopulationCurve.Enable = 0
+
+# Daily curve as "hour:percent" points (local hour 0-24, percent of PeakOnline), interpolated linearly
+# and wrapping around midnight.
+# Default: "0:25,4:12,8:20,12:40,17:60,20:100,23:70"
+AiPlayerbot.PopulationCurve.Points = "0:25,4:12,8:20,12:40,17:60,20:100,23:70"
+
+# Number of randombots online at 100% of the curve. Keep PeakOnline + (bots cooling down after their
+# session) below the pool, roughly PeakOnline * (1 + avg offline time / avg session time) < pool.
+# Default: 2500
+AiPlayerbot.PopulationCurve.PeakOnline = 2500
+
+# Local time used for the curve: UTC offset in minutes (standard time), plus EU summer time
+# (last Sunday of March to last Sunday of October adds one hour). 60 + EuropeanDst = Europe/Oslo.
+# Defaults: 60, 1
+AiPlayerbot.PopulationCurve.UtcOffsetMinutes = 60
+AiPlayerbot.PopulationCurve.EuropeanDst = 1
+
+# Seconds between recalculations of the target online count
+# Default: 300
+AiPlayerbot.PopulationCurve.UpdateInterval = 300
+
+# Minimum and maximum seconds of a bot's play session. Grouped bots stay until their group is gone.
+# Defaults: 3600 (1h), 14400 (4h)
+AiPlayerbot.PopulationCurve.MinSessionTime = 3600
+AiPlayerbot.PopulationCurve.MaxSessionTime = 14400
+
+# Minimum and maximum seconds a bot stays offline after a session. If the pool runs dry the bots with
+# the shortest remaining cooldown are allowed back early.
+# Defaults: 3600 (1h), 10800 (3h)
+AiPlayerbot.PopulationCurve.MinOfflineTime = 3600
+AiPlayerbot.PopulationCurve.MaxOfflineTime = 10800
+
+# Each bot has a stable chronotype from its guid (daytime 20%, evening 45%, night owl 20%, any time 15%).
+# This sets how strongly it biases which bots log in at the current hour (0 = no bias, 1 = strong)
+# Default: 0.7
+AiPlayerbot.PopulationCurve.ChronotypeBias = 0.7
+
+# Gradual sign-ups: randombot characters at or below Signups.MaxLevel (death knights excluded) are held
+# offline and released one by one, about Signups.PerDay per day, so the population appears to grow.
+# Released bots are not re-rolled to a random level; they level up by playing. The scan runs once per
+# start and only looks at characters newer than the last scan, so later characters queue behind.
+# Defaults: 0 (disabled), 1, 15
+AiPlayerbot.Signups.Enable = 0
+AiPlayerbot.Signups.MaxLevel = 1
+AiPlayerbot.Signups.PerDay = 15
+
 # Percentage ratio of Alliance and Horde randombots
 AiPlayerbot.RandomBotAllianceRatio = 50
 AiPlayerbot.RandomBotHordeRatio = 50

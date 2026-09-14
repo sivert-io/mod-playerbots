@@ -42,9 +42,11 @@
 #include "WorldSessionMgr.h"
 #include <algorithm>
 #include <boost/thread/thread.hpp>
+#include <cmath>
 #include <cstdlib>
 #include <ctime>
 #include <iomanip>
+#include <limits>
 #include <random>
 #include <set>
 #include <utility>
@@ -170,6 +172,148 @@ double botPIDImpl::calculate(double setpoint, double pv)
 botPIDImpl::~botPIDImpl() {}
 
 uint32 RandomPlayerbotMgr::GetMaxAllowedBotCount() { return GetEventValue(0, "bot_count"); }
+
+// Local hour of day [0, 24) for the population curve: fixed UTC offset plus optional
+// EU summer time (last Sunday of March 01:00 UTC to last Sunday of October 01:00 UTC).
+float RandomPlayerbotMgr::GetPopulationLocalHour(time_t now)
+{
+    int64 offset = int64(sPlayerbotAIConfig.populationCurveUtcOffsetMinutes) * MINUTE;
+    if (sPlayerbotAIConfig.populationCurveEuropeanDst)
+    {
+        std::tm utc{};
+        gmtime_r(&now, &utc);
+        auto lastSundayAt1Utc = [](int year, int month) -> time_t
+        {
+            std::tm t{};
+            t.tm_year = year;
+            t.tm_mon = month + 1;  // day 0 of the next month = last day of `month`
+            t.tm_mday = 0;
+            t.tm_hour = 1;
+            time_t ts = timegm(&t);
+            std::tm last{};
+            gmtime_r(&ts, &last);
+            return ts - time_t(last.tm_wday) * DAY;
+        };
+        if (now >= lastSundayAt1Utc(utc.tm_year, 2) && now < lastSundayAt1Utc(utc.tm_year, 9))
+            offset += HOUR;
+    }
+    int64 secondsOfDay = ((int64(now) + offset) % DAY + DAY) % DAY;
+    return float(secondsOfDay) / HOUR;
+}
+
+uint32 RandomPlayerbotMgr::GetPopulationCurveTarget(time_t now) const
+{
+    auto const& points = sPlayerbotAIConfig.populationCurvePoints;
+    float hour = GetPopulationLocalHour(now);
+
+    // Linear interpolation between the surrounding points, wrapping around midnight
+    std::pair<float, float> prev = points.back();
+    prev.first -= 24.0f;
+    std::pair<float, float> next = points.front();
+    next.first += 24.0f;
+    for (auto const& point : points)
+    {
+        if (point.first <= hour)
+            prev = point;
+        else
+        {
+            next = point;
+            break;
+        }
+    }
+
+    float pct = prev.second;
+    if (next.first > prev.first)
+        pct += (next.second - prev.second) * (hour - prev.first) / (next.first - prev.first);
+
+    uint32 target = uint32(std::lround(sPlayerbotAIConfig.populationCurvePeakOnline * pct / 100.0f));
+    return std::clamp<uint32>(target, 1, std::max<uint32>(1, sPlayerbotAIConfig.maxRandomBots));
+}
+
+// Every bot gets a stable chronotype from its guid; the weight (0, 1] says how likely it is
+// to play at the given local hour.
+float RandomPlayerbotMgr::GetChronotypeWeight(uint32 bot, float localHour)
+{
+    float bias = sPlayerbotAIConfig.populationChronotypeBias;
+    uint32 roll = (bot * 2654435761u >> 16) % 100;
+
+    float peakHour;
+    if (roll < 20)
+        peakHour = 11.0f;  // daytime player
+    else if (roll < 65)
+        peakHour = 20.0f;  // evening player
+    else if (roll < 85)
+        peakHour = 23.5f;  // night owl
+    else
+        return 1.0f;       // plays whenever
+
+    float distance = std::fabs(localHour - peakHour);
+    distance = std::min(distance, 24.0f - distance);
+    float preference = 0.15f + 0.85f * std::exp(-(distance * distance) / (2.0f * 3.0f * 3.0f));
+    return (1.0f - bias) + bias * preference;
+}
+
+bool RandomPlayerbotMgr::IsSignupPending(uint32 bot)
+{
+    if (!sPlayerbotAIConfig.signupsEnabled)
+        return false;
+
+    uint32 releaseAt = GetEventValue(bot, "signup");
+    return releaseAt && releaseAt > NowSeconds();
+}
+
+// Holds back low level random bots and gives each a release ("sign-up") time, spread over
+// days at AiPlayerbot.Signups.PerDay. Runs once per start; only characters with a guid above
+// the last scanned one are considered, so characters created later are queued behind the rest.
+void RandomPlayerbotMgr::InitSignups()
+{
+    signupsInitialized = true;
+    if (!sPlayerbotAIConfig.signupsEnabled || !sPlayerbotAIConfig.signupsPerDay || rndBotTypeAccounts.empty())
+        return;
+
+    std::ostringstream accounts;
+    for (size_t i = 0; i < rndBotTypeAccounts.size(); ++i)
+        accounts << (i ? "," : "") << rndBotTypeAccounts[i];
+
+    uint32 lastScannedGuid = GetEventValue(0, "signup_scan");
+    QueryResult maxGuidResult = CharacterDatabase.Query(
+        "SELECT MAX(guid) FROM characters WHERE account IN ({})", accounts.str());
+    uint32 maxGuid = maxGuidResult ? maxGuidResult->Fetch()[0].Get<uint32>() : 0;
+    if (maxGuid <= lastScannedGuid)
+        return;
+
+    std::vector<uint32> guids;
+    if (QueryResult result = CharacterDatabase.Query(
+            "SELECT guid FROM characters WHERE account IN ({}) AND level <= {} AND class <> {} AND guid > {}",
+            accounts.str(), sPlayerbotAIConfig.signupsMaxLevel, CLASS_DEATH_KNIGHT, lastScannedGuid))
+    {
+        do
+        {
+            guids.push_back(result->Fetch()[0].Get<uint32>());
+        } while (result->NextRow());
+    }
+
+    std::mt19937 rng(std::chrono::steady_clock::now().time_since_epoch().count());
+    std::shuffle(guids.begin(), guids.end(), rng);
+
+    uint32 spacing = std::max<uint32>(1, DAY / sPlayerbotAIConfig.signupsPerDay);
+    uint32 releaseAt = std::max(GetEventValue(0, "signup_last"), NowSeconds());
+    for (uint32 guid : guids)
+    {
+        releaseAt += urand(spacing / 2, spacing + spacing / 2);
+        GetEventValue(guid, "signup");  // loads the bot's event cache before writing
+        SetEventValue(guid, "signup", releaseAt, 0);
+        if (currentBots.erase(guid))
+            SetEventValue(guid, "add", 0, 0);
+    }
+
+    if (!guids.empty())
+        SetEventValue(0, "signup_last", releaseAt, 0);
+    SetEventValue(0, "signup_scan", maxGuid, 0);
+
+    LOG_INFO("playerbots", "Signups: {} low level bots queued, releasing ~{} per day (last one in {} days)",
+             guids.size(), sPlayerbotAIConfig.signupsPerDay, (releaseAt - NowSeconds()) / DAY);
+}
 
 void RandomPlayerbotMgr::LogPlayerLocation()
 {
@@ -297,9 +441,25 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
         ScaleBotActivity();
     }*/
 
+    if (!signupsInitialized)
+        InitSignups();
+
     uint32 maxAllowedBotCount = GetEventValue(0, "bot_count");
-    if (!maxAllowedBotCount || (maxAllowedBotCount < sPlayerbotAIConfig.minRandomBots ||
-                                maxAllowedBotCount > sPlayerbotAIConfig.maxRandomBots))
+    if (sPlayerbotAIConfig.populationCurveEnabled)
+    {
+        // Target online count follows the daily curve instead of a random roll
+        time_t now = time(nullptr);
+        if (!maxAllowedBotCount || now >= populationCurveTimer)
+        {
+            maxAllowedBotCount = GetPopulationCurveTarget(now);
+            SetEventValue(0, "bot_count", maxAllowedBotCount, sPlayerbotAIConfig.populationCurveUpdateInterval * 2);
+            populationCurveTimer = now + sPlayerbotAIConfig.populationCurveUpdateInterval;
+            LOG_DEBUG("playerbots", "Population curve: local hour {:.2f}, target online bots {}",
+                      GetPopulationLocalHour(now), maxAllowedBotCount);
+        }
+    }
+    else if (!maxAllowedBotCount || (maxAllowedBotCount < sPlayerbotAIConfig.minRandomBots ||
+                                     maxAllowedBotCount > sPlayerbotAIConfig.maxRandomBots))
     {
         maxAllowedBotCount = urand(sPlayerbotAIConfig.minRandomBots, sPlayerbotAIConfig.maxRandomBots);
         SetEventValue(0, "bot_count", maxAllowedBotCount,
@@ -315,7 +475,9 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     uint32 onlineBotCount = playerBots.size();
 
     uint32 onlineBotFocus = 75;
-    if (onlineBotCount < (uint32)(sPlayerbotAIConfig.minRandomBots * 90 / 100))
+    uint32 focusBotCount =
+        sPlayerbotAIConfig.populationCurveEnabled ? maxAllowedBotCount : sPlayerbotAIConfig.minRandomBots;
+    if (onlineBotCount < (uint32)(focusBotCount * 90 / 100))
         onlineBotFocus = 25;
 
     // only keep updating till initializing time has completed,
@@ -664,8 +826,9 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
         }
 
         // Determine which accounts to use based on EnablePeriodicOnlineOffline
+        // (the population curve manages the whole pool itself through sessions and offline cooldowns)
         std::vector<uint32> accountsToUse;
-        if (sPlayerbotAIConfig.enablePeriodicOnlineOffline)
+        if (sPlayerbotAIConfig.enablePeriodicOnlineOffline && !sPlayerbotAIConfig.populationCurveEnabled)
         {
 
             // Calculate how many accounts can be used
@@ -697,6 +860,18 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
         };
         std::vector<CharacterInfo> allCharacters;
 
+        // With the population curve the whole pool is scanned on every login wave, so the
+        // character list is cached instead of running one query per account each tick.
+        static std::vector<CharacterInfo> populationCharacterCache;
+        static time_t populationCharacterCacheTime = 0;
+        bool usePopulationCache = sPlayerbotAIConfig.populationCurveEnabled;
+        if (usePopulationCache && !populationCharacterCache.empty() &&
+            time(nullptr) < populationCharacterCacheTime + 15 * MINUTE)
+        {
+            allCharacters = populationCharacterCache;
+            accountsToUse.clear();
+        }
+
         for (uint32 accountId : accountsToUse)
         {
             CharacterDatabasePreparedStatement* stmt =
@@ -718,8 +893,31 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
             } while (result->NextRow());
         }
 
+        if (usePopulationCache && !accountsToUse.empty())
+        {
+            populationCharacterCache = allCharacters;
+            populationCharacterCacheTime = time(nullptr);
+        }
+
         // Shuffle for class balance
         std::shuffle(allCharacters.begin(), allCharacters.end(), rng);
+
+        if (sPlayerbotAIConfig.populationCurveEnabled && sPlayerbotAIConfig.populationChronotypeBias > 0.0f)
+        {
+            // Weighted random order (Efraimidis-Spirakis): bots whose chronotype matches the
+            // current local hour are more likely to be picked first.
+            float localHour = GetPopulationLocalHour(time(nullptr));
+            std::uniform_real_distribution<float> dist(std::numeric_limits<float>::min(), 1.0f);
+            std::vector<std::pair<float, CharacterInfo>> keyed;
+            keyed.reserve(allCharacters.size());
+            for (auto const& charInfo : allCharacters)
+                keyed.emplace_back(std::pow(dist(rng), 1.0f / GetChronotypeWeight(charInfo.guid, localHour)),
+                                   charInfo);
+            std::sort(keyed.begin(), keyed.end(),
+                      [](auto const& a, auto const& b) { return a.first > b.first; });
+            for (size_t i = 0; i < keyed.size(); ++i)
+                allCharacters[i] = keyed[i].second;
+        }
 
         // Separate characters by faction for phased login
         std::vector<CharacterInfo> allianceChars;
@@ -735,10 +933,11 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
         }
 
         // Lambda to handle bot login logic
-        auto tryLoginBot = [&](CharacterInfo const& charInfo) -> bool
+        auto tryLoginBot = [&](CharacterInfo const& charInfo, bool ignoreOfflineCooldown = false) -> bool
         {
             if (GetEventValue(charInfo.guid, "add") ||
-                GetEventValue(charInfo.guid, "logout") ||
+                (!ignoreOfflineCooldown && GetEventValue(charInfo.guid, "logout")) ||
+                IsSignupPending(charInfo.guid) ||
                 GetPlayerBot(charInfo.guid) ||
                 currentBots.contains(charInfo.guid) ||
                 (sPlayerbotAIConfig.disableDeathKnightLogin && charInfo.rClass == CLASS_DEATH_KNIGHT))
@@ -746,7 +945,10 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
                 return false;
             }
 
-            uint32 add_time = sPlayerbotAIConfig.enablePeriodicOnlineOffline
+            uint32 add_time = sPlayerbotAIConfig.populationCurveEnabled
+                                ? urand(sPlayerbotAIConfig.populationMinSessionTime,
+                                        sPlayerbotAIConfig.populationMaxSessionTime)
+                              : sPlayerbotAIConfig.enablePeriodicOnlineOffline
                                 ? urand(sPlayerbotAIConfig.minRandomBotInWorldTime,
                                         sPlayerbotAIConfig.maxRandomBotInWorldTime)
                                 : sPlayerbotAIConfig.permanentlyInWorldTime;
@@ -789,6 +991,31 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
 
             if (tryLoginBot(charInfo))
                 maxAllowedBotCount--;
+        }
+
+        // PHASE 3b: Population curve: the pool is exhausted, so let bots with the shortest
+        // remaining offline cooldown back in rather than missing the target
+        if (maxAllowedBotCount && sPlayerbotAIConfig.populationCurveEnabled)
+        {
+            std::vector<std::pair<uint32, CharacterInfo const*>> coolingDown;
+            for (auto const& charInfo : allCharacters)
+            {
+                CachedEvent* logout = FindEvent(charInfo.guid, "logout");
+                if (!logout)
+                    continue;
+                uint32 elapsed = NowSeconds() - logout->lastChangeTime;
+                coolingDown.emplace_back(logout->validIn > elapsed ? logout->validIn - elapsed : 0, &charInfo);
+            }
+            std::sort(coolingDown.begin(), coolingDown.end(),
+                      [](auto const& a, auto const& b) { return a.first < b.first; });
+            for (auto const& [remaining, charInfo] : coolingDown)
+            {
+                if (!maxAllowedBotCount)
+                    break;
+
+                if (tryLoginBot(*charInfo, true))
+                    maxAllowedBotCount--;
+            }
         }
 
         // PHASE 4: An error is given if maxAllowedBotCount is still not reached
@@ -1353,6 +1580,12 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
 
             SetEventValue(bot, "add", 0, 0);
             currentBots.erase(bot);
+
+            // Session over: stay offline for a while before this bot can be picked again
+            if (sPlayerbotAIConfig.populationCurveEnabled)
+                SetEventValue(bot, "logout", 1,
+                              urand(sPlayerbotAIConfig.populationMinOfflineTime,
+                                    sPlayerbotAIConfig.populationMaxOfflineTime));
 
             if (player)
                 LogoutPlayerBot(botGUID);
@@ -1932,7 +2165,14 @@ void RandomPlayerbotMgr::Randomize(Player* bot)
     if (bot->InBattleground())
         return;
 
-    if (bot->GetLevel() < 3 || (bot->GetLevel() < 56 && bot->getClass() == CLASS_DEATH_KNIGHT))
+    if (bot->GetLevel() < 3 && sPlayerbotAIConfig.signupsEnabled &&
+        GetEventValue(bot->GetGUID().GetCounter(), "signup"))
+    {
+        // Signed-up bots start at their current (low) level and level up by playing
+        PlayerbotFactory factory(bot, bot->GetLevel());
+        factory.Randomize(true);
+    }
+    else if (bot->GetLevel() < 3 || (bot->GetLevel() < 56 && bot->getClass() == CLASS_DEATH_KNIGHT))
     {
         RandomizeFirst(bot);
     }
@@ -2624,7 +2864,9 @@ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
         LOG_INFO("playerbots", "{}/{} Bot {} logged in", playerBots.size(),
                  sRandomPlayerbotMgr.GetMaxAllowedBotCount(), bot->GetName().c_str());
 
-        if (playerBots.size() == sRandomPlayerbotMgr.GetMaxAllowedBotCount())
+        // The population curve moves the target all day, so stop the per-login log after startup
+        if (playerBots.size() == sRandomPlayerbotMgr.GetMaxAllowedBotCount() ||
+            (sPlayerbotAIConfig.populationCurveEnabled && !_isBotInitializing))
         {
             _isBotLogging = false;
         }

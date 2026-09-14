@@ -699,6 +699,48 @@ bool PlayerbotAIConfig::Initialize()
     enablePeriodicOnlineOffline = sConfigMgr->GetOption<bool>("AiPlayerbot.EnablePeriodicOnlineOffline", false);
     enableRandomBotTrading = sConfigMgr->GetOption<int32>("AiPlayerbot.EnableRandomBotTrading", 1);
     periodicOnlineOfflineRatio = sConfigMgr->GetOption<float>("AiPlayerbot.PeriodicOnlineOfflineRatio", 2.0);
+
+    populationCurveEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.PopulationCurve.Enable", false);
+    populationCurvePoints.clear();
+    for (std::string const& point : split(sConfigMgr->GetOption<std::string>(
+             "AiPlayerbot.PopulationCurve.Points", "0:25,4:12,8:20,12:40,17:60,20:100,23:70"), ','))
+    {
+        std::vector<std::string> hp = split(point, ':');
+        if (hp.size() != 2)
+            continue;
+        try
+        {
+            float hour = std::stof(hp[0]);
+            float pct = std::stof(hp[1]);
+            if (hour >= 0.0f && hour < 24.0f && pct >= 0.0f)
+                populationCurvePoints.emplace_back(hour, pct);
+        }
+        catch (std::exception const&)
+        {
+            LOG_ERROR("playerbots", "Invalid AiPlayerbot.PopulationCurve.Points entry '{}'", point);
+        }
+    }
+    std::sort(populationCurvePoints.begin(), populationCurvePoints.end());
+    if (populationCurveEnabled && populationCurvePoints.empty())
+    {
+        LOG_ERROR("playerbots", "AiPlayerbot.PopulationCurve.Points has no valid points, population curve disabled");
+        populationCurveEnabled = false;
+    }
+    populationCurvePeakOnline = sConfigMgr->GetOption<int32>("AiPlayerbot.PopulationCurve.PeakOnline", 2500);
+    populationCurveUtcOffsetMinutes = sConfigMgr->GetOption<int32>("AiPlayerbot.PopulationCurve.UtcOffsetMinutes", 60);
+    populationCurveEuropeanDst = sConfigMgr->GetOption<bool>("AiPlayerbot.PopulationCurve.EuropeanDst", true);
+    populationCurveUpdateInterval = std::max(30, sConfigMgr->GetOption<int32>("AiPlayerbot.PopulationCurve.UpdateInterval", 300));
+    populationMinSessionTime = sConfigMgr->GetOption<int32>("AiPlayerbot.PopulationCurve.MinSessionTime", 1 * HOUR);
+    populationMaxSessionTime = std::max(populationMinSessionTime,
+        (uint32)sConfigMgr->GetOption<int32>("AiPlayerbot.PopulationCurve.MaxSessionTime", 4 * HOUR));
+    populationMinOfflineTime = sConfigMgr->GetOption<int32>("AiPlayerbot.PopulationCurve.MinOfflineTime", 1 * HOUR);
+    populationMaxOfflineTime = std::max(populationMinOfflineTime,
+        (uint32)sConfigMgr->GetOption<int32>("AiPlayerbot.PopulationCurve.MaxOfflineTime", 3 * HOUR));
+    populationChronotypeBias = std::clamp(sConfigMgr->GetOption<float>("AiPlayerbot.PopulationCurve.ChronotypeBias", 0.7f), 0.0f, 1.0f);
+
+    signupsEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.Signups.Enable", false);
+    signupsMaxLevel = sConfigMgr->GetOption<int32>("AiPlayerbot.Signups.MaxLevel", 1);
+    signupsPerDay = sConfigMgr->GetOption<int32>("AiPlayerbot.Signups.PerDay", 15);
     gearscorecheck = sConfigMgr->GetOption<bool>("AiPlayerbot.GearScoreCheck", false);
     randomBotPreQuests = sConfigMgr->GetOption<bool>("AiPlayerbot.PreQuests", false);
 
