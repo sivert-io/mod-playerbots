@@ -400,6 +400,10 @@ int RandomBotLevelMgr::GetOrFlagPlayerBracket(Player* player)
     if (isRandomBot && sPlayerbotAIConfig.levelBracketsIgnoreArenaTeamBots && BotInArenaTeam(player))
         return -1;
 
+    // Signed-up bots keep the level they earn by playing
+    if (isRandomBot && sRandomPlayerbotMgr.IsSignupBot(player->GetGUID().GetCounter()))
+        return -1;
+
     // Exclude bots grouped with a real player from bracket processing.
     if (isRandomBot)
     {

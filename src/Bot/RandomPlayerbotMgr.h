@@ -175,6 +175,9 @@ public:
     void AssignAccountTypes();
     bool IsAccountType(uint32 accountId, uint8 accountType);
 
+    // True for bots queued or released by AiPlayerbot.Signups (they level up by playing)
+    bool IsSignupBot(uint32 bot) { return sPlayerbotAIConfig.signupsEnabled && GetEventValue(bot, "signup"); }
+
 protected:
     void OnBotLoginInternal(Player* const bot) override;
 

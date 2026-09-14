@@ -2165,8 +2165,7 @@ void RandomPlayerbotMgr::Randomize(Player* bot)
     if (bot->InBattleground())
         return;
 
-    if (bot->GetLevel() < 3 && sPlayerbotAIConfig.signupsEnabled &&
-        GetEventValue(bot->GetGUID().GetCounter(), "signup"))
+    if (bot->GetLevel() < 3 && IsSignupBot(bot->GetGUID().GetCounter()))
     {
         // Signed-up bots start at their current (low) level and level up by playing
         PlayerbotFactory factory(bot, bot->GetLevel());
