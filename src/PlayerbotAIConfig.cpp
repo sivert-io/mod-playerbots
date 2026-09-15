@@ -852,6 +852,10 @@ bool PlayerbotAIConfig::Initialize()
     arrivalsPerYear = sConfigMgr->GetOption<int32>("AiPlayerbot.Arrivals.PerYear", 5000);
     arrivalsCap = sConfigMgr->GetOption<int32>("AiPlayerbot.Arrivals.Cap", 5000);
     arrivalsDayShape = std::clamp(sConfigMgr->GetOption<float>("AiPlayerbot.Arrivals.DayShape", 0.8f), 0.05f, 100.0f);
+    arrivalsScaleMidWeek = sConfigMgr->GetOption<bool>("AiPlayerbot.Arrivals.ScaleMidWeek", true);
+    arrivalsBacklogSpreadMinutes =
+        std::clamp(sConfigMgr->GetOption<int32>("AiPlayerbot.Arrivals.BacklogSpreadMinutes", 180), 0, 7 * 24 * 60);
+    arrivalsMaxPerHour = std::max(0, sConfigMgr->GetOption<int32>("AiPlayerbot.Arrivals.MaxPerHour", 8));
     arrivalsWeekdayWeights.clear();
     for (std::string const& token : SplitList(
              sConfigMgr->GetOption<std::string>("AiPlayerbot.Arrivals.WeekdayWeights", "1,1,1,1,1.1,1.4,1.3"), ','))

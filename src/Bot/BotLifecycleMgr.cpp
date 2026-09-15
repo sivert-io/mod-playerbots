@@ -19,6 +19,7 @@
 #include "WorldSession.h"
 #include <algorithm>
 #include <cmath>
+#include <ctime>
 #include <mutex>
 #include <sstream>
 
@@ -31,6 +32,67 @@ constexpr uint32 ARRIVAL_SPACING = 20;          // minimum seconds between two a
 constexpr uint32 MAINTENANCE_INTERVAL = 60;
 constexpr uint32 WEEK_CHECK_INTERVAL = 10 * MINUTE;
 constexpr uint32 MIN_OFFLINE_GAP = 45 * MINUTE;
+constexpr uint32 PLAN_GRACE = WEEK_CHECK_INTERVAL + 5 * MINUTE;  // a week planned this soon after it began is planned whole
+constexpr uint32 ARRIVAL_STATS_INTERVAL = 30 * MINUTE;
+
+// HourWeights curve: linear between points, wrapping around midnight
+float HourWeightAt(std::vector<std::pair<float, float>> const& points, float hour)
+{
+    if (points.empty())
+        return 1.0f;
+    std::pair<float, float> prev = points.back();
+    prev.first -= 24.0f;
+    std::pair<float, float> next = points.front();
+    next.first += 24.0f;
+    for (auto const& point : points)
+    {
+        if (point.first <= hour)
+            prev = point;
+        else
+        {
+            next = point;
+            break;
+        }
+    }
+    float weight = prev.second;
+    if (next.first > prev.first)
+        weight += (next.second - prev.second) * (hour - prev.first) / (next.first - prev.first);
+    return std::max(0.0f, weight);
+}
+
+// Integral of the HourWeights curve over [from, to] hours (trapezoids of at most 3 minutes)
+float HourMass(std::vector<std::pair<float, float>> const& points, float from, float to)
+{
+    if (to <= from)
+        return 0.0f;
+    uint32 const steps = std::max<uint32>(1, uint32(std::ceil((to - from) / 0.05f)));
+    float const width = (to - from) / steps;
+    float mass = 0.0f;
+    for (uint32 i = 0; i < steps; ++i)
+        mass += (HourWeightAt(points, from + i * width) + HourWeightAt(points, from + (i + 1) * width)) * 0.5f * width;
+    return mass;
+}
+
+uint32 StochasticRound(float value)
+{
+    if (value <= 0.0f)
+        return 0;
+    uint32 whole = uint32(value);
+    if (frand(0.0f, 1.0f) < value - float(whole))
+        ++whole;
+    return whole;
+}
+
+// "Mon 2026-09-14 00:00" in the population clock's local time
+std::string LocalTimeStr(uint32 time)
+{
+    time_t const local = time_t(int64(time) + RandomPlayerbotMgr::GetPopulationUtcOffset(time));
+    std::tm tm{};
+    gmtime_r(&local, &tm);
+    char buffer[32];
+    std::strftime(buffer, sizeof(buffer), "%a %Y-%m-%d %H:%M", &tm);
+    return buffer;
+}
 }  // namespace
 
 char const* BotLifecycleMgr::ChronotypeName(BotChronotype type)
@@ -113,6 +175,23 @@ void BotLifecycleMgr::CreateTables()
         "KEY `idx_status_time` (`status`, `scheduled_at`),"
         "KEY `idx_week` (`week_start`)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Astro Realm: planned and completed bot arrivals'");
+
+    PlayerbotsDatabase.DirectExecute(
+        "CREATE TABLE IF NOT EXISTS `astro_bot_arrival_weeks` ("
+        "`week_start` INT UNSIGNED NOT NULL,"
+        "`planned_at` INT UNSIGNED NOT NULL,"
+        "`plan` VARCHAR(16) NOT NULL,"
+        "`share` FLOAT NOT NULL,"
+        "`week_budget` FLOAT NOT NULL,"
+        "`budget` INT UNSIGNED NOT NULL,"
+        "`existing` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`added` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`total` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`per_day` VARCHAR(64) NOT NULL DEFAULT '',"
+        "`first_at` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "`last_at` INT UNSIGNED NOT NULL DEFAULT 0,"
+        "PRIMARY KEY (`week_start`)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Astro Realm: one row per planned arrivals week'");
 }
 
 void BotLifecycleMgr::Init()
@@ -150,13 +229,18 @@ void BotLifecycleMgr::Init()
 
         // Arrivals that were being created when the server stopped are retried
         PlayerbotsDatabase.DirectExecute("UPDATE astro_bot_arrivals SET status = 'pending' WHERE status = 'creating'");
+        ReloadPendingArrivals();
+        SpreadArrivalBacklog(now);
+
+        // Arrivals of the last hour count towards MaxPerHour after a restart
+        recentArrivalStarts.clear();
         if (QueryResult result = PlayerbotsDatabase.Query(
-                "SELECT id, scheduled_at FROM astro_bot_arrivals WHERE status = 'pending' ORDER BY scheduled_at"))
+                "SELECT created_at FROM astro_bot_arrivals WHERE status = 'done' AND created_at > {} ORDER BY created_at",
+                now > HOUR ? now - HOUR : 0))
         {
             do
             {
-                Field* fields = result->Fetch();
-                pendingArrivals.emplace_back(fields[0].Get<uint32>(), fields[1].Get<uint32>());
+                recentArrivalStarts.push_back(result->Fetch()[0].Get<uint32>());
             } while (result->NextRow());
         }
     }
@@ -578,131 +662,306 @@ uint32 BotLifecycleMgr::GetWeekStart(uint32 now) const
     return uint32((days - weekday) * DAY - offset);
 }
 
-float BotLifecycleMgr::SampleArrivalHour()
+float BotLifecycleMgr::SampleArrivalHour(float minHour)
 {
     auto const& points = sPlayerbotAIConfig.arrivalsHourPoints;
-    float maxWeight = 0.0f;
+    minHour = std::clamp(minHour, 0.0f, 24.0f);
+    float const span = 24.0f - minHour;
+    if (span <= 0.0f)
+        return minHour;
+
+    // Largest weight inside [minHour, 24): the curve is piecewise linear, so an end or a point
+    float maxWeight = std::max(HourWeightAt(points, minHour), HourWeightAt(points, 24.0f));
     for (auto const& point : points)
-        maxWeight = std::max(maxWeight, point.second);
-    if (maxWeight <= 0.0f)
-        return frand(0.0f, 24.0f);
+        if (point.first >= minHour)
+            maxWeight = std::max(maxWeight, point.second);
 
-    auto weightAt = [&points](float hour)
-    {
-        std::pair<float, float> prev = points.back();
-        prev.first -= 24.0f;
-        std::pair<float, float> next = points.front();
-        next.first += 24.0f;
-        for (auto const& point : points)
-        {
-            if (point.first <= hour)
-                prev = point;
-            else
-            {
-                next = point;
-                break;
-            }
-        }
-        float weight = prev.second;
-        if (next.first > prev.first)
-            weight += (next.second - prev.second) * (hour - prev.first) / (next.first - prev.first);
-        return weight;
-    };
+    // No weight left in the window (or none at all): uniform over the window
+    if (maxWeight <= 0.0f || HourMass(points, minHour, 24.0f) <= 1e-4f)
+        return minHour + frand(0.0f, span);
 
-    for (uint32 attempt = 0; attempt < 100; ++attempt)
+    for (uint32 attempt = 0; attempt < 200; ++attempt)
     {
-        float hour = frand(0.0f, 24.0f);
-        if (frand(0.0f, maxWeight) <= weightAt(hour))
-            return hour;
+        float hour = minHour + frand(0.0f, span);
+        if (frand(0.0f, maxWeight) <= HourWeightAt(points, hour))
+            return std::min(hour, 24.0f);
     }
-    return frand(0.0f, 24.0f);
+    return minHour + frand(0.0f, span);
 }
 
-// Plans this week's arrivals once: a budget of PerYear * 7 / 365 (+-15%), spread over the days with
-// weights WeekdayWeights[d] * Gamma(DayShape) so some days get many and others none, each at a
-// sign-up hour drawn from HourWeights (local time). Slots already in the past are dropped.
-void BotLifecycleMgr::EnsureWeekPlan(uint32 now)
+float BotLifecycleMgr::RemainingWeekShare(uint32 weekStart, uint32 from) const
 {
-    uint32 const weekStart = GetWeekStart(now);
-    if (weekStart == plannedWeekStart)
-        return;
+    if (from <= weekStart)
+        return 1.0f;
+    if (from >= weekStart + 7 * DAY)
+        return 0.0f;
 
-    if (QueryResult result = PlayerbotsDatabase.Query("SELECT COUNT(*) FROM astro_bot_arrivals WHERE week_start = {}", weekStart))
+    auto const& points = sPlayerbotAIConfig.arrivalsHourPoints;
+    uint32 const today = (from - weekStart) / DAY;
+    float const hourNow = float(from - weekStart - today * DAY) / HOUR;
+    float const dayMass = HourMass(points, 0.0f, 24.0f);
+    float const todayShare = dayMass > 0.0f ? HourMass(points, hourNow, 24.0f) / dayMass : (24.0f - hourNow) / 24.0f;
+
+    float ahead = 0.0f, total = 0.0f;
+    for (uint32 d = 0; d < 7; ++d)
     {
-        if (result->Fetch()[0].Get<uint64>() > 0)
-        {
-            plannedWeekStart = weekStart;
-            return;
-        }
+        float const weight = sPlayerbotAIConfig.arrivalsWeekdayWeights[d];
+        total += weight;
+        if (d > today)
+            ahead += weight;
+        else if (d == today)
+            ahead += weight * todayShare;
     }
+    if (total <= 0.0f)
+        return float(weekStart + 7 * DAY - from) / float(7 * DAY);
+    return std::clamp(ahead / total, 0.0f, 1.0f);
+}
 
-    float const mean = sPlayerbotAIConfig.arrivalsPerYear * 7.0f / 365.25f;
-    float const noisy = mean * frand(0.85f, 1.15f);
-    uint32 budget = uint32(noisy);
-    if (frand(0.0f, 1.0f) < noisy - float(budget))
-        ++budget;
+std::vector<uint32> BotLifecycleMgr::DrawWeekSlots(uint32 weekStart, uint32 from, uint32 now, uint32 count,
+                                                   std::array<uint32, 7>& perDay)
+{
+    perDay.fill(0);
+    std::vector<uint32> times;
+    if (!count)
+        return times;
+
+    uint32 const weekEnd = weekStart + 7 * DAY;
+    from = std::clamp(from, weekStart, weekEnd - 1);
+    uint32 const earliest = std::max(from, now);
+    uint32 const today = (from - weekStart) / DAY;
+    float const hourNow = float(from - weekStart - today * DAY) / HOUR;
+
+    // Fully past days get no weight; today only the hour weight still ahead
+    auto const& points = sPlayerbotAIConfig.arrivalsHourPoints;
+    float const dayMass = HourMass(points, 0.0f, 24.0f);
+    float const todayShare = dayMass > 0.0f ? HourMass(points, hourNow, 24.0f) / dayMass : (24.0f - hourNow) / 24.0f;
 
     std::gamma_distribution<float> gamma(sPlayerbotAIConfig.arrivalsDayShape, 1.0f);
     std::array<float, 7> dayWeights{};
     float total = 0.0f;
     for (uint32 d = 0; d < 7; ++d)
     {
-        dayWeights[d] = sPlayerbotAIConfig.arrivalsWeekdayWeights[d] * gamma(rng);
+        float const g = gamma(rng);
+        if (d < today)
+            continue;
+        dayWeights[d] = sPlayerbotAIConfig.arrivalsWeekdayWeights[d] * g * (d == today ? todayShare : 1.0f);
         total += dayWeights[d];
     }
 
-    std::array<uint32, 7> perDay{};
-    std::vector<uint32> times;
-    for (uint32 i = 0; i < budget && total > 0.0f; ++i)
+    times.reserve(count);
+    for (uint32 i = 0; i < count; ++i)
     {
-        float roll = frand(0.0f, total);
-        uint32 day = 6;
-        for (uint32 d = 0; d < 7; ++d)
+        uint32 day = today;
+        uint32 at;
+        if (total > 0.0f)
         {
-            roll -= dayWeights[d];
-            if (roll <= 0.0f)
+            float roll = frand(0.0f, total);
+            day = 6;
+            for (uint32 d = today; d < 7; ++d)
             {
+                if (dayWeights[d] <= 0.0f)
+                    continue;
                 day = d;
-                break;
+                roll -= dayWeights[d];
+                if (roll <= 0.0f)
+                    break;
             }
+            float const hour = SampleArrivalHour(day == today ? hourNow : 0.0f);
+            uint32 const dayStart = weekStart + day * DAY;
+            at = std::min(dayStart + uint32(hour * HOUR), dayStart + DAY - 1);
         }
-        ++perDay[day];
+        else
+        {
+            // No weight left anywhere this week: uniform over the rest of it
+            at = from + uint32(frand(0.0f, 1.0f) * float(weekEnd - 1 - from));
+            day = (at - weekStart) / DAY;
+        }
 
-        uint32 const at = weekStart + day * DAY + uint32(SampleArrivalHour() * HOUR);
-        if (at >= now)
-            times.push_back(at);
+        // Never dropped: a slot that would be in the past happens now instead
+        times.push_back(std::max(at, earliest));
+        ++perDay[std::min<uint32>(day, 6)];
+    }
+    std::sort(times.begin(), times.end());
+    return times;
+}
+
+// Plans a week's arrivals once, recorded in astro_bot_arrival_weeks. A full week gets a budget of
+// PerYear * 7 / 365 (+-15%) spread over the days with weights WeekdayWeights[d] * Gamma(DayShape), each at a
+// sign-up hour drawn from HourWeights (local time). A week that already started (first start mid-week, or
+// after downtime) only plans the time still ahead: past days get weight 0, today's hours are truncated to
+// [now, midnight) and, with ScaleMidWeek, the budget is scaled to the share of the week still ahead. A week
+// planned by an older build (rows without a week record) is topped up to that budget once.
+void BotLifecycleMgr::EnsureWeekPlan(uint32 now)
+{
+    uint32 const weekStart = GetWeekStart(now);
+    if (weekStart == plannedWeekStart)
+        return;
+
+    if (PlayerbotsDatabase.Query("SELECT 1 FROM astro_bot_arrival_weeks WHERE week_start = {}", weekStart))
+    {
+        plannedWeekStart = weekStart;
+        return;
     }
 
-    std::ostringstream sql;
+    uint32 rowsAll = 0, rowsReal = 0, rowsAhead = 0;
+    if (QueryResult result = PlayerbotsDatabase.Query(
+            "SELECT COUNT(*), CAST(COALESCE(SUM(status <> 'empty'), 0) AS UNSIGNED), "
+            "CAST(COALESCE(SUM(status IN ('pending', 'creating')), 0) AS UNSIGNED) "
+            "FROM astro_bot_arrivals WHERE week_start = {}", weekStart))
+    {
+        Field* f = result->Fetch();
+        rowsAll = uint32(f[0].Get<uint64>());
+        rowsReal = uint32(f[1].Get<uint64>());
+        rowsAhead = uint32(f[2].Get<uint64>());
+    }
+    bool const legacy = rowsAll > 0;
+
+    // Planned right after the week began (the check runs every WEEK_CHECK_INTERVAL): the whole week
+    uint32 const from = !legacy && now - weekStart <= PLAN_GRACE ? weekStart : now;
+    float const share = sPlayerbotAIConfig.arrivalsScaleMidWeek ? RemainingWeekShare(weekStart, from) : 1.0f;
+    float const weekBudget = sPlayerbotAIConfig.arrivalsPerYear * 7.0f / 365.25f * frand(0.85f, 1.15f);
+    uint32 const budget = StochasticRound(weekBudget * share);
+    uint32 const existing = !legacy ? 0 : sPlayerbotAIConfig.arrivalsScaleMidWeek ? rowsAhead : rowsReal;
+    uint32 const add = budget > existing ? budget - existing : 0;
+
+    std::array<uint32, 7> addedPerDay{};
+    std::vector<uint32> const times = DrawWeekSlots(weekStart, from, now, add, addedPerDay);
+
     if (!times.empty())
     {
-        std::sort(times.begin(), times.end());
+        std::ostringstream sql;
         sql << "INSERT INTO astro_bot_arrivals (week_start, scheduled_at, status) VALUES ";
         for (size_t i = 0; i < times.size(); ++i)
             sql << (i ? "," : "") << "(" << weekStart << "," << times[i] << ",'pending')";
+        PlayerbotsDatabase.DirectExecute(sql.str());
     }
-    else
+    else if (!rowsAll)
     {
-        // Marker so the week is not planned again after a restart
-        sql << "INSERT INTO astro_bot_arrivals (week_start, scheduled_at, status) VALUES (" << weekStart << ","
-            << weekStart << ",'empty')";
+        // Marker so older builds do not plan the week again
+        PlayerbotsDatabase.DirectExecute(
+            "INSERT INTO astro_bot_arrivals (week_start, scheduled_at, status) VALUES ({}, {}, 'empty')", weekStart,
+            weekStart);
     }
-    PlayerbotsDatabase.DirectExecute(sql.str());
 
+    // Summary of the whole week as it now stands (earlier rows included)
+    std::array<uint32, 7> perDay{};
+    uint32 rows = 0, first = 0, last = 0;
+    if (QueryResult result = PlayerbotsDatabase.Query(
+            "SELECT scheduled_at FROM astro_bot_arrivals WHERE week_start = {} AND status <> 'empty' ORDER BY scheduled_at",
+            weekStart))
+    {
+        do
+        {
+            uint32 const at = result->Fetch()[0].Get<uint32>();
+            ++perDay[std::min<uint32>(at > weekStart ? (at - weekStart) / DAY : 0, 6)];
+            first = rows++ ? first : at;
+            last = at;
+        } while (result->NextRow());
+    }
+
+    char const* plan = legacy ? "topped_up" : from == weekStart ? "full" : "mid_week";
+    std::ostringstream days;
+    for (uint32 d = 0; d < 7; ++d)
+        days << (d ? " " : "") << perDay[d];
+
+    PlayerbotsDatabase.DirectExecute(
+        "INSERT IGNORE INTO astro_bot_arrival_weeks (week_start, planned_at, plan, share, week_budget, budget, existing, "
+        "added, total, per_day, first_at, last_at) VALUES ({}, {}, '{}', {:.4f}, {:.2f}, {}, {}, {}, {}, '{}', {}, {})",
+        weekStart, now, plan, share, weekBudget, budget, existing, times.size(), rows, days.str(), first, last);
+
+    ReloadPendingArrivals();
+    plannedWeekStart = weekStart;
+
+    LOG_INFO("server.worldserver",
+             "Arrivals: week of {} planned ({}): {:.1f}% of the week ahead, budget {} (full week {:.1f}), {} existing, "
+             "{} added; Mon..Sun {} = {} total, first {}, last {}; {} pending",
+             LocalTimeStr(weekStart), plan, share * 100.0f, budget, weekBudget, existing, times.size(), days.str(), rows,
+             rows ? LocalTimeStr(first) : "-", rows ? LocalTimeStr(last) : "-", pendingArrivals.size());
+}
+
+void BotLifecycleMgr::ReloadPendingArrivals()
+{
     pendingArrivals.clear();
     if (QueryResult result = PlayerbotsDatabase.Query(
-            "SELECT id, scheduled_at FROM astro_bot_arrivals WHERE status = 'pending' ORDER BY scheduled_at"))
+            "SELECT id, scheduled_at FROM astro_bot_arrivals WHERE status = 'pending' ORDER BY scheduled_at, id"))
     {
         do
         {
             Field* fields = result->Fetch();
-            pendingArrivals.emplace_back(fields[0].Get<uint32>(), fields[1].Get<uint32>());
+            uint32 const id = fields[0].Get<uint32>();
+            if (hasActiveArrival && id == activeArrival.rowId)
+                continue;  // its 'creating' update may still be queued
+            pendingArrivals.emplace_back(id, fields[1].Get<uint32>());
+        } while (result->NextRow());
+    }
+}
+
+// Arrivals that came due while the server was down are spread in order over the next BacklogSpreadMinutes
+// instead of all signing up at once
+void BotLifecycleMgr::SpreadArrivalBacklog(uint32 now)
+{
+    size_t overdue = 0;
+    while (overdue < pendingArrivals.size() && pendingArrivals[overdue].second < now)
+        ++overdue;
+    if (!overdue || !sPlayerbotAIConfig.arrivalsBacklogSpreadMinutes)
+        return;
+
+    uint32 const oldest = pendingArrivals.front().second;
+    float const step = float(sPlayerbotAIConfig.arrivalsBacklogSpreadMinutes * MINUTE) / float(overdue);
+    PlayerbotsDatabaseTransaction trans = PlayerbotsDatabase.BeginTransaction();
+    for (size_t i = 0; i < overdue; ++i)
+    {
+        // One slot per overdue arrival, each in its own sub-window, so the order is kept
+        uint32 const at = now + uint32((float(i) + frand(0.0f, 0.999f)) * step);
+        pendingArrivals[i].second = at;
+        trans->Append("UPDATE astro_bot_arrivals SET scheduled_at = {} WHERE id = {}", at, pendingArrivals[i].first);
+    }
+    PlayerbotsDatabase.DirectCommitTransaction(trans);
+    std::stable_sort(pendingArrivals.begin(), pendingArrivals.end(),
+                     [](auto const& a, auto const& b) { return a.second < b.second; });
+
+    LOG_INFO("server.loading", ">> Arrivals: {} overdue arrivals (oldest due {}) spread over the next {} minutes", overdue,
+             LocalTimeStr(oldest), sPlayerbotAIConfig.arrivalsBacklogSpreadMinutes);
+}
+
+void BotLifecycleMgr::LogArrivalStats(uint32 now)
+{
+    uint32 done = 0, failed = 0, capped = 0;
+    if (QueryResult result = PlayerbotsDatabase.Query(
+            "SELECT status, COUNT(*) FROM astro_bot_arrivals WHERE week_start = {} GROUP BY status", plannedWeekStart))
+    {
+        do
+        {
+            Field* f = result->Fetch();
+            std::string const status = f[0].Get<std::string>();
+            uint32 const count = uint32(f[1].Get<uint64>());
+            if (status == "done")
+                done = count;
+            else if (status == "failed")
+                failed = count;
+            else if (status == "capped")
+                capped = count;
         } while (result->NextRow());
     }
 
-    plannedWeekStart = weekStart;
-    LOG_INFO("playerbots", "Arrivals: week plan {} bots (Mon..Sun {} {} {} {} {} {} {}), {} still ahead", budget,
-             perDay[0], perDay[1], perDay[2], perDay[3], perDay[4], perDay[5], perDay[6], times.size());
+    size_t due = 0;
+    for (auto const& pending : pendingArrivals)
+    {
+        if (pending.second > now)
+            break;
+        ++due;
+    }
+
+    while (!recentArrivalStarts.empty() && recentArrivalStarts.front() + HOUR <= now)
+        recentArrivalStarts.pop_front();
+
+    LOG_INFO("server.worldserver",
+             "Arrivals: week of {}: {} done, {} failed, {} capped; {} pending ({} due now), next {}; {} started in the "
+             "last hour (MaxPerHour {}), {} waits for MaxPerHour since the last report",
+             LocalTimeStr(plannedWeekStart), done, failed, capped, pendingArrivals.size() + (hasActiveArrival ? 1 : 0),
+             due, pendingArrivals.empty() ? "-" : LocalTimeStr(pendingArrivals.front().second),
+             recentArrivalStarts.size(), sPlayerbotAIConfig.arrivalsMaxPerHour, arrivalsDeferred);
+    arrivalsDeferred = 0;
 }
 
 void BotLifecycleMgr::FinishArrival(char const* status)
@@ -725,6 +984,16 @@ void BotLifecycleMgr::ProcessArrivals(uint32 now)
         if (pendingArrivals.empty() || pendingArrivals.front().second > now)
             return;
 
+        // Rolling hourly cap: the arrival stays pending and starts once the oldest of the last hour ages out
+        while (!recentArrivalStarts.empty() && recentArrivalStarts.front() + HOUR <= now)
+            recentArrivalStarts.pop_front();
+        if (sPlayerbotAIConfig.arrivalsMaxPerHour && recentArrivalStarts.size() >= sPlayerbotAIConfig.arrivalsMaxPerHour)
+        {
+            ++arrivalsDeferred;
+            nextArrivalStep = recentArrivalStarts.front() + HOUR;
+            return;
+        }
+
         activeArrival = PendingArrival();
         activeArrival.rowId = pendingArrivals.front().first;
         pendingArrivals.pop_front();
@@ -741,6 +1010,7 @@ void BotLifecycleMgr::ProcessArrivals(uint32 now)
             return;
         }
 
+        recentArrivalStarts.push_back(now);
         PlayerbotsDatabase.Execute("UPDATE astro_bot_arrivals SET status = 'creating' WHERE id = {}", activeArrival.rowId);
     }
 
@@ -879,4 +1149,10 @@ void BotLifecycleMgr::Update()
     }
 
     ProcessArrivals(now);
+
+    if (now >= nextArrivalStats && plannedWeekStart)
+    {
+        nextArrivalStats = now + ARRIVAL_STATS_INTERVAL;
+        LogArrivalStats(now);
+    }
 }
