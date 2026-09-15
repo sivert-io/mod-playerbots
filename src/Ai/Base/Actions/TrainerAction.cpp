@@ -193,6 +193,13 @@ bool MaintenanceAction::Execute(Event /*event*/)
         return false;
     }
 
+    // AiPlayerbot.Lifecycle.NoShortcuts: random bots get their gear, spells and supplies by playing
+    if (sRandomPlayerbotMgr.IsNoShortcutsBot(bot))
+    {
+        botAI->TellError("I get my gear and spells by playing.");
+        return false;
+    }
+
     botAI->TellMaster("I'm maintaining");
     PlayerbotFactory factory(bot, bot->GetLevel());
 
@@ -316,6 +323,13 @@ bool BisGearAction::Execute(Event event)
         botAI->TellError(PlayerbotTextMgr::instance().GetBotTextOrDefault(
             "bis_command_unavailable_error",
             "bis command is not allowed, please check the configuration.", {}));
+        return false;
+    }
+
+    // AiPlayerbot.Lifecycle.NoShortcuts: random bots get their gear, spells and supplies by playing
+    if (sRandomPlayerbotMgr.IsNoShortcutsBot(bot))
+    {
+        botAI->TellError("I get my gear and spells by playing.");
         return false;
     }
 
@@ -572,6 +586,13 @@ bool AutoGearAction::Execute(Event event)
     {
         botAI->TellError(PlayerbotTextMgr::instance().GetBotTextOrDefault(
             "autogear_command_disabled_error", "autogear command is not allowed, please check the configuration.", {}));
+        return false;
+    }
+
+    // AiPlayerbot.Lifecycle.NoShortcuts: random bots get their gear, spells and supplies by playing
+    if (sRandomPlayerbotMgr.IsNoShortcutsBot(bot))
+    {
+        botAI->TellError("I get my gear and spells by playing.");
         return false;
     }
 

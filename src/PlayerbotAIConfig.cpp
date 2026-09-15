@@ -6,6 +6,7 @@
 
 #include "PlayerbotAIConfig.h"
 #include "BisListMgr.h"
+#include "BotLifecycleMgr.h"
 #include "Config.h"
 #include "NewRpgInfo.h"
 #include "PlayerbotDungeonRepository.h"
@@ -18,8 +19,79 @@
 #include "Talentspec.h"
 #include "TravelMgr.h"
 #include <cctype>
+#include <stdexcept>
 #include <iostream>
 #include <sstream>
+
+namespace
+{
+// Splits "a,b,c" into trimmed, non-empty tokens
+std::vector<std::string> SplitList(std::string const& value, char delim)
+{
+    std::vector<std::string> tokens;
+    std::stringstream ss(value);
+    std::string token;
+    while (std::getline(ss, token, delim))
+    {
+        token.erase(0, token.find_first_not_of(" \t"));
+        token.erase(token.find_last_not_of(" \t") + 1);
+        if (!token.empty())
+            tokens.push_back(token);
+    }
+    return tokens;
+}
+
+// "key:weight,key:weight" -> map (key uint8)
+std::unordered_map<uint8, float> ParseIdWeights(std::string const& option, std::string const& value)
+{
+    std::unordered_map<uint8, float> weights;
+    for (std::string const& entry : SplitList(value, ','))
+    {
+        std::vector<std::string> kv = SplitList(entry, ':');
+        try
+        {
+            if (kv.size() != 2)
+                throw std::invalid_argument(entry);
+            weights[uint8(std::stoul(kv[0]))] = std::max(0.0f, std::stof(kv[1]));
+        }
+        catch (std::exception const&)
+        {
+            LOG_ERROR("playerbots", "Invalid {} entry '{}'", option, entry);
+        }
+    }
+    return weights;
+}
+
+// "min-max:weight,..." -> ((min, max), weight); a single number is used as min and max
+std::vector<std::pair<std::pair<uint32, uint32>, float>> ParseRangeWeights(std::string const& option,
+                                                                           std::string const& value)
+{
+    std::vector<std::pair<std::pair<uint32, uint32>, float>> ranges;
+    for (std::string const& entry : SplitList(value, ','))
+    {
+        std::vector<std::string> kv = SplitList(entry, ':');
+        try
+        {
+            if (kv.size() != 2)
+                throw std::invalid_argument(entry);
+            std::vector<std::string> mm = SplitList(kv[0], '-');
+            if (mm.empty() || mm.size() > 2)
+                throw std::invalid_argument(entry);
+            uint32 min = std::stoul(mm[0]);
+            uint32 max = mm.size() == 2 ? std::stoul(mm[1]) : min;
+            float weight = std::stof(kv[1]);
+            if (max < min || weight < 0.0f)
+                throw std::invalid_argument(entry);
+            ranges.push_back({{min, max}, weight});
+        }
+        catch (std::exception const&)
+        {
+            LOG_ERROR("playerbots", "Invalid {} entry '{}'", option, entry);
+        }
+    }
+    return ranges;
+}
+}  // namespace
 
 template <class T>
 void LoadList(std::string const value, T& list)
@@ -741,6 +813,70 @@ bool PlayerbotAIConfig::Initialize()
     signupsEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.Signups.Enable", false);
     signupsMaxLevel = sConfigMgr->GetOption<int32>("AiPlayerbot.Signups.MaxLevel", 1);
     signupsPerDay = sConfigMgr->GetOption<int32>("AiPlayerbot.Signups.PerDay", 15);
+
+    lifecycleEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.Lifecycle.Enable", false);
+    lifecycleMaxOnline = sConfigMgr->GetOption<int32>("AiPlayerbot.Lifecycle.MaxOnline", 2800);
+    lifecycleNoShortcuts = sConfigMgr->GetOption<bool>("AiPlayerbot.Lifecycle.NoShortcuts", false);
+    lifecycleGhostTimeout = std::max(60, sConfigMgr->GetOption<int32>("AiPlayerbot.Lifecycle.GhostTimeout", 1800));
+    lifecycleGuildMinLevel = sConfigMgr->GetOption<int32>("AiPlayerbot.Lifecycle.GuildMinLevel", 10);
+    lifecycleSessionsPerWeek = ParseRangeWeights("AiPlayerbot.Lifecycle.SessionsPerWeek",
+        sConfigMgr->GetOption<std::string>("AiPlayerbot.Lifecycle.SessionsPerWeek", "1-3:30,4-7:45,8-14:25"));
+    lifecycleSessionsPerWeek.erase(
+        std::remove_if(lifecycleSessionsPerWeek.begin(), lifecycleSessionsPerWeek.end(),
+                       [](auto const& r) { return r.first.first == 0 || r.second <= 0.0f; }),
+        lifecycleSessionsPerWeek.end());
+    if (lifecycleSessionsPerWeek.empty())
+        lifecycleSessionsPerWeek.push_back({{4, 7}, 1.0f});
+    lifecycleSessionMinutesMedian =
+        std::max(10, sConfigMgr->GetOption<int32>("AiPlayerbot.Lifecycle.SessionMinutesMedian", 90));
+    lifecycleBreaks = ParseRangeWeights("AiPlayerbot.Lifecycle.Breaks",
+        sConfigMgr->GetOption<std::string>("AiPlayerbot.Lifecycle.Breaks", "2-5:5,7-14:1.5,25-35:0.5,120-180:0.12"));
+    lifecycleQuitPercentPerYear =
+        std::clamp(sConfigMgr->GetOption<float>("AiPlayerbot.Lifecycle.QuitPercentPerYear", 4.0f), 0.0f, 100.0f);
+    lifecyclePlaystyleInfluence =
+        std::clamp(sConfigMgr->GetOption<float>("AiPlayerbot.Lifecycle.PlaystyleInfluence", 1.0f), 0.0f, 1.0f);
+
+    arrivalsEnabled = sConfigMgr->GetOption<bool>("AiPlayerbot.Arrivals.Enable", false);
+    arrivalsPerYear = sConfigMgr->GetOption<int32>("AiPlayerbot.Arrivals.PerYear", 5000);
+    arrivalsCap = sConfigMgr->GetOption<int32>("AiPlayerbot.Arrivals.Cap", 5000);
+    arrivalsDayShape = std::clamp(sConfigMgr->GetOption<float>("AiPlayerbot.Arrivals.DayShape", 0.8f), 0.05f, 100.0f);
+    arrivalsWeekdayWeights.clear();
+    for (std::string const& token : SplitList(
+             sConfigMgr->GetOption<std::string>("AiPlayerbot.Arrivals.WeekdayWeights", "1,1,1,1,1.1,1.4,1.3"), ','))
+    {
+        try
+        {
+            arrivalsWeekdayWeights.push_back(std::max(0.0f, std::stof(token)));
+        }
+        catch (std::exception const&)
+        {
+            LOG_ERROR("playerbots", "Invalid AiPlayerbot.Arrivals.WeekdayWeights entry '{}'", token);
+        }
+    }
+    if (arrivalsWeekdayWeights.size() != 7)
+    {
+        LOG_ERROR("playerbots", "AiPlayerbot.Arrivals.WeekdayWeights needs 7 values (Monday..Sunday), using equal weights");
+        arrivalsWeekdayWeights.assign(7, 1.0f);
+    }
+    arrivalsHourPoints.clear();
+    for (auto const& [hour, weight] : ParseIdWeights("AiPlayerbot.Arrivals.HourWeights",
+             sConfigMgr->GetOption<std::string>("AiPlayerbot.Arrivals.HourWeights",
+                                                "0:3,3:1,7:2,10:4,13:6,16:8,19:10,21:9,23:5")))
+    {
+        if (hour < 24)
+            arrivalsHourPoints.emplace_back(float(hour), weight);
+    }
+    std::sort(arrivalsHourPoints.begin(), arrivalsHourPoints.end());
+    if (arrivalsHourPoints.empty())
+        arrivalsHourPoints.emplace_back(0.0f, 1.0f);
+    arrivalsAllianceRatio = std::clamp(sConfigMgr->GetOption<int32>("AiPlayerbot.Arrivals.AllianceRatio", 55), 0, 100);
+    arrivalsRaceWeights = ParseIdWeights("AiPlayerbot.Arrivals.RaceWeights",
+        sConfigMgr->GetOption<std::string>("AiPlayerbot.Arrivals.RaceWeights",
+                                           "1:32,3:15,4:27,7:9,11:17,2:19,5:20,6:15,8:8,10:38"));
+    arrivalsClassWeights = ParseIdWeights("AiPlayerbot.Arrivals.ClassWeights",
+        sConfigMgr->GetOption<std::string>("AiPlayerbot.Arrivals.ClassWeights",
+                                           "1:13,2:11,3:12,4:9,5:9,7:7,8:11,9:8,11:9"));
+    arrivalsFemaleChance = std::clamp(sConfigMgr->GetOption<int32>("AiPlayerbot.Arrivals.FemaleChance", 35), 0, 100);
     gearscorecheck = sConfigMgr->GetOption<bool>("AiPlayerbot.GearScoreCheck", false);
     randomBotPreQuests = sConfigMgr->GetOption<bool>("AiPlayerbot.PreQuests", false);
 
@@ -809,6 +945,7 @@ bool PlayerbotAIConfig::Initialize()
     if (sPlayerbotAIConfig.enabled)
     {
         sRandomPlayerbotMgr.Init();
+        sBotLifecycleMgr.Init();
     }
 
     PlayerbotGuildMgr::instance().Init();

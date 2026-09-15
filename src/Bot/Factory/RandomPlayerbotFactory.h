@@ -52,6 +52,10 @@ public:
     virtual ~RandomPlayerbotFactory() {}
 
     Player* CreateRandomBot(WorldSession* session, uint8 cls, std::unordered_map<NameRaceAndGender, std::vector<std::string>>& names);
+    // Creates (but does not save) a level 1 character with the given race, class and gender
+    Player* CreateBot(WorldSession* session, uint8 race, uint8 cls, uint8 gender,
+                      std::unordered_map<NameRaceAndGender, std::vector<std::string>>& names);
+    static bool PickArrivalRaceClass(uint8& race, uint8& cls);
     static void CreateRandomBots();
     static std::string const CreateRandomGuildName();
     static uint32 CalculateTotalAccountCount();

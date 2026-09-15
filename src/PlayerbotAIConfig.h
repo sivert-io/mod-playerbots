@@ -333,6 +333,30 @@ public:
     uint32 signupsMaxLevel;
     uint32 signupsPerDay;
 
+    // Bot lifecycle: persistent personas, personal play schedules, breaks and quitting
+    // (AiPlayerbot.Lifecycle.*), runtime arrivals of new level 1 bots (AiPlayerbot.Arrivals.*)
+    // and progression without shortcuts (AiPlayerbot.Lifecycle.NoShortcuts)
+    bool lifecycleEnabled;
+    uint32 lifecycleMaxOnline;
+    bool lifecycleNoShortcuts;
+    uint32 lifecycleGhostTimeout;
+    uint32 lifecycleGuildMinLevel;
+    std::vector<std::pair<std::pair<uint32, uint32>, float>> lifecycleSessionsPerWeek;  // ((min, max), weight)
+    uint32 lifecycleSessionMinutesMedian;
+    std::vector<std::pair<std::pair<uint32, uint32>, float>> lifecycleBreaks;  // ((min days, max days), per year)
+    float lifecycleQuitPercentPerYear;
+    float lifecyclePlaystyleInfluence;
+    bool arrivalsEnabled;
+    uint32 arrivalsPerYear;
+    uint32 arrivalsCap;
+    float arrivalsDayShape;
+    std::vector<float> arrivalsWeekdayWeights;                  // Monday .. Sunday
+    std::vector<std::pair<float, float>> arrivalsHourPoints;    // (local hour, weight)
+    uint32 arrivalsAllianceRatio;
+    std::unordered_map<uint8, float> arrivalsRaceWeights;
+    std::unordered_map<uint8, float> arrivalsClassWeights;
+    uint32 arrivalsFemaleChance;
+
     bool gearscorecheck;
     bool randomBotPreQuests;
     bool botSendMailEnabled;

@@ -40,6 +40,7 @@
 #include "Unit.h"
 #include "World.h"
 #include "WorldSessionMgr.h"
+#include "BotLifecycleMgr.h"
 #include <algorithm>
 #include <boost/thread/thread.hpp>
 #include <cmath>
@@ -175,7 +176,7 @@ uint32 RandomPlayerbotMgr::GetMaxAllowedBotCount() { return GetEventValue(0, "bo
 
 // Local hour of day [0, 24) for the population curve: fixed UTC offset plus optional
 // EU summer time (last Sunday of March 01:00 UTC to last Sunday of October 01:00 UTC).
-float RandomPlayerbotMgr::GetPopulationLocalHour(time_t now)
+int64 RandomPlayerbotMgr::GetPopulationUtcOffset(time_t now)
 {
     int64 offset = int64(sPlayerbotAIConfig.populationCurveUtcOffsetMinutes) * MINUTE;
     if (sPlayerbotAIConfig.populationCurveEuropeanDst)
@@ -197,6 +198,12 @@ float RandomPlayerbotMgr::GetPopulationLocalHour(time_t now)
         if (now >= lastSundayAt1Utc(utc.tm_year, 2) && now < lastSundayAt1Utc(utc.tm_year, 9))
             offset += HOUR;
     }
+    return offset;
+}
+
+float RandomPlayerbotMgr::GetPopulationLocalHour(time_t now)
+{
+    int64 offset = GetPopulationUtcOffset(now);
     int64 secondsOfDay = ((int64(now) + offset) % DAY + DAY) % DAY;
     return float(secondsOfDay) / HOUR;
 }
@@ -251,6 +258,19 @@ float RandomPlayerbotMgr::GetChronotypeWeight(uint32 bot, float localHour)
     distance = std::min(distance, 24.0f - distance);
     float preference = 0.15f + 0.85f * std::exp(-(distance * distance) / (2.0f * 3.0f * 3.0f));
     return (1.0f - bias) + bias * preference;
+}
+
+void RandomPlayerbotMgr::RegisterArrivalAccount(uint32 accountId)
+{
+    if (std::find(rndBotTypeAccounts.begin(), rndBotTypeAccounts.end(), accountId) == rndBotTypeAccounts.end())
+        rndBotTypeAccounts.push_back(accountId);
+    if (!sPlayerbotAIConfig.IsInRandomAccountList(accountId))
+        sPlayerbotAIConfig.randomBotAccounts.push_back(accountId);
+}
+
+bool RandomPlayerbotMgr::IsNoShortcutsBot(Player* bot)
+{
+    return bot && sPlayerbotAIConfig.lifecycleNoShortcuts && IsRandomBot(bot);
 }
 
 bool RandomPlayerbotMgr::IsSignupPending(uint32 bot)
@@ -441,11 +461,22 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
         ScaleBotActivity();
     }*/
 
-    if (!signupsInitialized)
+    // Arrivals replace sign-ups while the lifecycle is active
+    if (!signupsInitialized && !sBotLifecycleMgr.IsActive())
         InitSignups();
 
     uint32 maxAllowedBotCount = GetEventValue(0, "bot_count");
-    if (sPlayerbotAIConfig.populationCurveEnabled)
+    if (sBotLifecycleMgr.IsActive())
+    {
+        // Who is online emerges from each bot's own schedule; bot_count is only the safety cap
+        sBotLifecycleMgr.Update();
+        if (maxAllowedBotCount != sPlayerbotAIConfig.lifecycleMaxOnline)
+        {
+            maxAllowedBotCount = sPlayerbotAIConfig.lifecycleMaxOnline;
+            SetEventValue(0, "bot_count", maxAllowedBotCount, 0);
+        }
+    }
+    else if (sPlayerbotAIConfig.populationCurveEnabled)
     {
         // Target online count follows the daily curve instead of a random roll
         time_t now = time(nullptr);
@@ -475,8 +506,9 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 /*elapsed*/, bool /*minimal*/)
     uint32 onlineBotCount = playerBots.size();
 
     uint32 onlineBotFocus = 75;
-    uint32 focusBotCount =
-        sPlayerbotAIConfig.populationCurveEnabled ? maxAllowedBotCount : sPlayerbotAIConfig.minRandomBots;
+    uint32 focusBotCount = sBotLifecycleMgr.IsActive()                   ? 0
+                           : sPlayerbotAIConfig.populationCurveEnabled ? maxAllowedBotCount
+                                                                       : sPlayerbotAIConfig.minRandomBots;
     if (onlineBotCount < (uint32)(focusBotCount * 90 / 100))
         onlineBotFocus = 25;
 
@@ -703,7 +735,14 @@ void RandomPlayerbotMgr::AssignAccountTypes()
 
     // Calculate needed RNDbot accounts
     uint32 neededRndBotAccounts = 0;
-    if (sPlayerbotAIConfig.maxRandomBots > 0)
+    if (sPlayerbotAIConfig.arrivalsEnabled)
+    {
+        // Every account created by arrivals is a random bot account (one character each)
+        for (uint32 accountId : allRandomBotAccounts)
+            if (currentAssignments[accountId] != 2)
+                ++neededRndBotAccounts;
+    }
+    else if (sPlayerbotAIConfig.maxRandomBots > 0)
     {
         int divisor = RandomPlayerbotFactory::CalculateAvailableCharsPerAccount();
         int maxBots = sPlayerbotAIConfig.maxRandomBots;
@@ -859,12 +898,20 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
             uint32 accountId;
         };
         std::vector<CharacterInfo> allCharacters;
+        bool const lifecycle = sBotLifecycleMgr.IsActive();
+        if (lifecycle)
+        {
+            // Only bots whose own next login time has come
+            for (BotLoginCandidate const& candidate : sBotLifecycleMgr.GetDueCandidates(NowSeconds()))
+                allCharacters.push_back({candidate.guid, candidate.cls, candidate.race, candidate.accountId});
+            accountsToUse.clear();
+        }
 
         // With the population curve the whole pool is scanned on every login wave, so the
         // character list is cached instead of running one query per account each tick.
         static std::vector<CharacterInfo> populationCharacterCache;
         static time_t populationCharacterCacheTime = 0;
-        bool usePopulationCache = sPlayerbotAIConfig.populationCurveEnabled;
+        bool usePopulationCache = sPlayerbotAIConfig.populationCurveEnabled && !lifecycle;
         if (usePopulationCache && !populationCharacterCache.empty() &&
             time(nullptr) < populationCharacterCacheTime + 15 * MINUTE)
         {
@@ -899,10 +946,11 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
             populationCharacterCacheTime = time(nullptr);
         }
 
-        // Shuffle for class balance
-        std::shuffle(allCharacters.begin(), allCharacters.end(), rng);
+        // Shuffle for class balance (lifecycle candidates keep their longest-waiting-first order)
+        if (!lifecycle)
+            std::shuffle(allCharacters.begin(), allCharacters.end(), rng);
 
-        if (sPlayerbotAIConfig.populationCurveEnabled && sPlayerbotAIConfig.populationChronotypeBias > 0.0f)
+        if (!lifecycle && sPlayerbotAIConfig.populationCurveEnabled && sPlayerbotAIConfig.populationChronotypeBias > 0.0f)
         {
             // Weighted random order (Efraimidis-Spirakis): bots whose chronotype matches the
             // current local hour are more likely to be picked first.
@@ -936,8 +984,8 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
         auto tryLoginBot = [&](CharacterInfo const& charInfo, bool ignoreOfflineCooldown = false) -> bool
         {
             if (GetEventValue(charInfo.guid, "add") ||
-                (!ignoreOfflineCooldown && GetEventValue(charInfo.guid, "logout")) ||
-                IsSignupPending(charInfo.guid) ||
+                (!lifecycle && !ignoreOfflineCooldown && GetEventValue(charInfo.guid, "logout")) ||
+                (!lifecycle && IsSignupPending(charInfo.guid)) ||
                 GetPlayerBot(charInfo.guid) ||
                 currentBots.contains(charInfo.guid) ||
                 (sPlayerbotAIConfig.disableDeathKnightLogin && charInfo.rClass == CLASS_DEATH_KNIGHT))
@@ -945,7 +993,8 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
                 return false;
             }
 
-            uint32 add_time = sPlayerbotAIConfig.populationCurveEnabled
+            uint32 add_time = lifecycle ? sBotLifecycleMgr.StartSession(charInfo.guid, NowSeconds())
+                              : sPlayerbotAIConfig.populationCurveEnabled
                                 ? urand(sPlayerbotAIConfig.populationMinSessionTime,
                                         sPlayerbotAIConfig.populationMaxSessionTime)
                               : sPlayerbotAIConfig.enablePeriodicOnlineOffline
@@ -995,7 +1044,7 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
 
         // PHASE 3b: Population curve: the pool is exhausted, so let bots with the shortest
         // remaining offline cooldown back in rather than missing the target
-        if (maxAllowedBotCount && sPlayerbotAIConfig.populationCurveEnabled)
+        if (maxAllowedBotCount && sPlayerbotAIConfig.populationCurveEnabled && !lifecycle)
         {
             std::vector<std::pair<uint32, CharacterInfo const*>> coolingDown;
             for (auto const& charInfo : allCharacters)
@@ -1019,7 +1068,8 @@ uint32 RandomPlayerbotMgr::AddRandomBots()
         }
 
         // PHASE 4: An error is given if maxAllowedBotCount is still not reached
-        if (maxAllowedBotCount)
+        // (with the lifecycle the cap is normally not reached: only bots due to play log in)
+        if (maxAllowedBotCount && !lifecycle)
         {
             if (missingBotsTimer == 0)
                 missingBotsTimer = time(nullptr);
@@ -1582,7 +1632,9 @@ bool RandomPlayerbotMgr::ProcessBot(uint32 bot)
             currentBots.erase(bot);
 
             // Session over: stay offline for a while before this bot can be picked again
-            if (sPlayerbotAIConfig.populationCurveEnabled)
+            if (sBotLifecycleMgr.IsActive() && sBotLifecycleMgr.HasPersona(bot))
+                sBotLifecycleMgr.EndSession(bot, NowSeconds());
+            else if (sPlayerbotAIConfig.populationCurveEnabled)
                 SetEventValue(bot, "logout", 1,
                               urand(sPlayerbotAIConfig.populationMinOfflineTime,
                                     sPlayerbotAIConfig.populationMaxOfflineTime));
@@ -1689,6 +1741,52 @@ bool RandomPlayerbotMgr::ProcessBot(Player* bot)
         return false;
 
      uint32 botId = bot->GetGUID().GetCounter();
+
+    if (IsNoShortcutsBot(bot))
+    {
+        // Plays like a player: no randomize, level teleports or refresh. A bot that stays dead for
+        // Lifecycle.GhostTimeout (its AI failed the corpse run) releases and takes the spirit healer
+        // resurrection with resurrection sickness.
+        if (bot->isDead())
+        {
+            if (!GetEventValue(botId, "dead"))
+            {
+                SetEventValue(botId, "dead", 1, sPlayerbotAIConfig.maxRandomBotInWorldTime);
+                SetEventValue(botId, "revive", 1, sPlayerbotAIConfig.lifecycleGhostTimeout);
+                return false;
+            }
+
+            if (!GetEventValue(botId, "revive"))
+            {
+                if (!bot->HasPlayerFlag(PLAYER_FLAGS_GHOST))
+                {
+                    bot->BuildPlayerRepop();
+                    bot->RepopAtGraveyard();
+                    SetEventValue(botId, "revive", 1, 30);
+                    return true;
+                }
+
+                SetEventValue(botId, "dead", 0, 0);
+                SetEventValue(botId, "revive", 0, 0);
+                bot->ResurrectPlayer(0.5f, true);
+                bot->SpawnCorpseBones();
+                return true;
+            }
+            return false;
+        }
+
+        if (GetEventValue(botId, "dead"))
+        {
+            SetEventValue(botId, "dead", 0, 0);
+            SetEventValue(botId, "revive", 0, 0);
+        }
+
+        Group* group = bot->GetGroup();
+        if (group && !group->isLFGGroup() && IsRandomBot(group->GetLeader()))
+            botAI->LeaveOrDisbandGroup();
+
+        return false;
+    }
 
     // if death revive
     if (bot->isDead())
@@ -2015,7 +2113,7 @@ void RandomPlayerbotMgr::InitArenaTeams()
 
 void RandomPlayerbotMgr::RandomTeleportForLevel(Player* bot)
 {
-    if (bot->InBattleground())
+    if (bot->InBattleground() || IsNoShortcutsBot(bot))
         return;
 
     if (bot->GetLevel() >= 10 && urand(0, 100) < sPlayerbotAIConfig.probTeleToBankers * 100)
@@ -2111,7 +2209,7 @@ std::vector<WorldLocation> RandomPlayerbotMgr::GetPlayerZoneTeleportLocations(st
 
 void RandomPlayerbotMgr::RandomTeleportGrindForLevel(Player* bot)
 {
-    if (bot->InBattleground())
+    if (bot->InBattleground() || IsNoShortcutsBot(bot))
         return;
 
     std::vector<WorldLocation> locs = sTravelMgr.GetTeleportLocations(bot);
@@ -2123,7 +2221,7 @@ void RandomPlayerbotMgr::RandomTeleportGrindForLevel(Player* bot)
 
 void RandomPlayerbotMgr::RandomTeleport(Player* bot)
 {
-    if (bot->InBattleground())
+    if (bot->InBattleground() || IsNoShortcutsBot(bot))
         return;
 
     PerfMonitorOperation* pmo = sPerfMonitor.start(PERF_MON_RNDBOT, "RandomTeleport");
@@ -2162,7 +2260,7 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot)
 
 void RandomPlayerbotMgr::Randomize(Player* bot)
 {
-    if (bot->InBattleground())
+    if (bot->InBattleground() || IsNoShortcutsBot(bot))
         return;
 
     if (bot->GetLevel() < 3 && IsSignupBot(bot->GetGUID().GetCounter()))
@@ -2385,6 +2483,13 @@ void RandomPlayerbotMgr::Refresh(Player* bot)
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
     if (!botAI)
         return;
+
+    // No free resurrection, repairs, consumables, spells or gold (e.g. when joining a dungeon)
+    if (IsNoShortcutsBot(bot))
+    {
+        botAI->Reset();
+        return;
+    }
 
     if (bot->isDead())
     {
@@ -2871,14 +2976,19 @@ void RandomPlayerbotMgr::OnBotLoginInternal(Player* const bot)
         }
     }
 
+    bool const noShortcuts = IsNoShortcutsBot(bot);
+
     // Run guild recovery/assignment at login to handle empty guild tables after restart.
-    if (sPlayerbotAIConfig.randomBotGuildCount > 0)
+    if (sPlayerbotAIConfig.randomBotGuildCount > 0 &&
+        (!noShortcuts || bot->GetLevel() >= sPlayerbotAIConfig.lifecycleGuildMinLevel))
     {
         PlayerbotFactory factory(bot, bot->GetLevel());
         factory.InitGuild();
     }
 
-    RandomPlayerbotFactory::AssignBotToArenaTeam(bot);
+    // Bot arena teams come with a made-up rating
+    if (!noShortcuts)
+        RandomPlayerbotFactory::AssignBotToArenaTeam(bot);
 
     if (sPlayerbotAIConfig.randomBotFixedLevel)
     {
@@ -2987,6 +3097,8 @@ void RandomPlayerbotMgr::OnPlayerLoginError(uint32 bot)
 {
     SetEventValue(bot, "add", 0, 0);
     currentBots.erase(bot);
+    if (sBotLifecycleMgr.IsActive())
+        sBotLifecycleMgr.OnLoginFailed(bot, NowSeconds());
 }
 
 Player* RandomPlayerbotMgr::GetRandomPlayer()
@@ -3002,6 +3114,8 @@ void RandomPlayerbotMgr::PrintStats()
 {
     printStatsTimer = time(nullptr);
     LOG_INFO("playerbots", "Random Bots Stats: {} online", playerBots.size());
+    if (sBotLifecycleMgr.IsActive())
+        LOG_INFO("playerbots", "Bot lifecycle: {}", sBotLifecycleMgr.GetStatsLine(NowSeconds()));
 
     std::map<uint8, uint32> alliance, horde;
     for (uint32 i = 0; i < 10; ++i)

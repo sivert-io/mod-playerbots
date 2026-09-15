@@ -73,6 +73,9 @@ public:
     static void InitTalentsBySpecNo(Player* bot, int specNo, bool reset);
     static void InitTalentsByParsedSpecLink(Player* bot, std::vector<std::vector<uint32>> parsedSpecLink, bool reset);
     void InitAvailableSpells();
+    // Learns class trainer spells the bot can use at its level and pays the trainer cost for each,
+    // skipping what it cannot afford (AiPlayerbot.Lifecycle.NoShortcuts). Returns spells learned.
+    uint32 LearnPaidClassTrainerSpells();
     static bool IsTrainerSpellAllowedForBot(Player* bot, Trainer::Trainer const* trainer,
                                              Trainer::Spell const* trainerSpell);
     void InitClassSpells();

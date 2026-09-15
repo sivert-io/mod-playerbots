@@ -24,7 +24,8 @@ bool AutoMaintenanceOnLevelupAction::Execute(Event /*event*/)
 
 void AutoMaintenanceOnLevelupAction::AutoTeleportForLevel()
 {
-    if (!sPlayerbotAIConfig.autoTeleportForLevel || !sRandomPlayerbotMgr.IsRandomBot(bot))
+    if (!sPlayerbotAIConfig.autoTeleportForLevel || !sRandomPlayerbotMgr.IsRandomBot(bot) ||
+        sRandomPlayerbotMgr.IsNoShortcutsBot(bot))
         return;
 
     if (botAI->HasGameClientMaster())
@@ -68,7 +69,19 @@ void AutoMaintenanceOnLevelupAction::AutoLearnSpell()
 void AutoMaintenanceOnLevelupAction::LearnSpells(std::ostringstream* out)
 {
     BroadcastHelper::BroadcastLevelup(botAI, bot);
-    if (sPlayerbotAIConfig.autoLearnTrainerSpells && sRandomPlayerbotMgr.IsRandomBot(bot))
+    if (sRandomPlayerbotMgr.IsNoShortcutsBot(bot))
+    {
+        // Stands in for the trip to the class trainer: new ranks are paid for, unaffordable ones wait.
+        // No free weapon skills, riding or professions. Hunters still get a pet from level 10 since
+        // bots cannot do the taming quest.
+        if (sPlayerbotAIConfig.autoLearnTrainerSpells)
+        {
+            PlayerbotFactory factory(bot, bot->GetLevel());
+            factory.LearnPaidClassTrainerSpells();
+            factory.InitPet();
+        }
+    }
+    else if (sPlayerbotAIConfig.autoLearnTrainerSpells && sRandomPlayerbotMgr.IsRandomBot(bot))
         LearnTrainerSpells(out);
 
     if (sPlayerbotAIConfig.autoLearnQuestSpells && sRandomPlayerbotMgr.IsRandomBot(bot))
@@ -160,7 +173,8 @@ std::string const AutoMaintenanceOnLevelupAction::FormatSpell(SpellInfo const* s
 
 void AutoMaintenanceOnLevelupAction::AutoUpgradeEquip()
 {
-    if (!sRandomPlayerbotMgr.IsRandomBot(bot))
+    // No-shortcuts bots only wear and use what they loot or buy
+    if (!sRandomPlayerbotMgr.IsRandomBot(bot) || sRandomPlayerbotMgr.IsNoShortcutsBot(bot))
         return;
 
     PlayerbotFactory factory(bot, bot->GetLevel());

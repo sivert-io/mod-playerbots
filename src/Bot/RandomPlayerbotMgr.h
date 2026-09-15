@@ -175,6 +175,16 @@ public:
     void AssignAccountTypes();
     bool IsAccountType(uint32 accountId, uint8 accountType);
 
+    // Local time used by the population curve and bot lifecycle (UTC offset in seconds / hour of day)
+    static int64 GetPopulationUtcOffset(time_t now);
+    static float GetPopulationLocalHour(time_t now);
+
+    // Adds an account created at runtime by arrivals to the random bot account lists
+    void RegisterArrivalAccount(uint32 accountId);
+
+    // AiPlayerbot.Lifecycle.NoShortcuts applies to this bot: no randomize, teleports, refresh, free gear or gold
+    bool IsNoShortcutsBot(Player* bot);
+
     // True for bots queued or released by AiPlayerbot.Signups (they level up by playing)
     bool IsSignupBot(uint32 bot) { return sPlayerbotAIConfig.signupsEnabled && GetEventValue(bot, "signup"); }
 
@@ -244,7 +254,6 @@ private:
     // Population lifecycle (AiPlayerbot.PopulationCurve.* / AiPlayerbot.Signups.*)
     uint32 GetPopulationCurveTarget(time_t now) const;
     static float GetChronotypeWeight(uint32 bot, float localHour);
-    static float GetPopulationLocalHour(time_t now);
     void InitSignups();
     bool IsSignupPending(uint32 bot);
     time_t populationCurveTimer = 0;

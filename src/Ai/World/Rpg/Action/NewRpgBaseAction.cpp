@@ -5,6 +5,8 @@
  */
 
 #include "NewRpgBaseAction.h"
+
+#include "BotLifecycleMgr.h"
 #include "BroadcastHelper.h"
 #include "ChatHelper.h"
 #include "Creature.h"
@@ -1092,6 +1094,7 @@ bool NewRpgBaseAction::SelectRandomFlightTaxiNode(uint32& flightMasterEntry, Wor
 bool NewRpgBaseAction::RandomChangeStatus(std::vector<NewRpgStatus> candidateStatus)
 {
     std::vector<NewRpgStatus> availableStatus;
+    std::unordered_map<NewRpgStatus, uint32> weights;
     uint32 probSum = 0;
     for (NewRpgStatus status : candidateStatus)
     {
@@ -1100,8 +1103,12 @@ bool NewRpgBaseAction::RandomChangeStatus(std::vector<NewRpgStatus> candidateSta
 
         if (CheckRpgStatusAvailable(status))
         {
+            // Scaled by the bot's persona playstyle when the bot lifecycle is enabled
+            uint32 const weight = sBotLifecycleMgr.GetRpgStatusWeight(bot->GetGUID().GetCounter(), status,
+                                                                      sPlayerbotAIConfig.RpgStatusProbWeight[status]);
+            weights[status] = weight;
             availableStatus.push_back(status);
-            probSum += sPlayerbotAIConfig.RpgStatusProbWeight[status];
+            probSum += weight;
         }
     }
     // Safety check. Default to "rest" if all RPG weights = 0
@@ -1116,7 +1123,7 @@ bool NewRpgBaseAction::RandomChangeStatus(std::vector<NewRpgStatus> candidateSta
     NewRpgStatus chosenStatus = RPG_STATUS_END;
     for (NewRpgStatus status : availableStatus)
     {
-        accumulate += sPlayerbotAIConfig.RpgStatusProbWeight[status];
+        accumulate += weights[status];
         if (accumulate >= rand)
         {
             chosenStatus = status;

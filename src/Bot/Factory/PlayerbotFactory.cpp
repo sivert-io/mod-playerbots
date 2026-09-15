@@ -39,6 +39,7 @@
 #include "Trainer.h"
 #include "World.h"
 #include <array>
+#include <set>
 #include <unordered_set>
 #include <utility>
 
@@ -3489,6 +3490,79 @@ void PlayerbotFactory::InitAvailableSpells()
                 bot->learnSpell(trainerSpell->SpellId, false);
         }
     }
+}
+
+uint32 PlayerbotFactory::LearnPaidClassTrainerSpells()
+{
+    uint8 const cls = bot->getClass();
+    if (trainerIdCache[cls].empty())
+    {
+        CreatureTemplateContainer const* creatureTemplateContainer = sObjectMgr->GetCreatureTemplates();
+        for (auto const& [entry, creatureTemplate] : *creatureTemplateContainer)
+        {
+            Trainer::Trainer* trainer = sObjectMgr->GetTrainer(entry);
+            if (!trainer)
+                continue;
+
+            if (trainer->GetTrainerType() != Trainer::Type::Tradeskill &&
+                trainer->GetTrainerType() != Trainer::Type::Class)
+                continue;
+
+            if (trainer->GetTrainerType() == Trainer::Type::Class && !trainer->IsTrainerValidForPlayer(bot))
+                continue;
+
+            trainerIdCache[cls].push_back(entry);
+        }
+    }
+
+    // Class trainers only (no professions, riding or pet trainers), cheapest level requirement first.
+    // Several passes so a rank learned in this call can unlock the next one.
+    uint32 learned = 0;
+    std::set<uint32> seen;
+    for (uint32 pass = 0; pass < 3; ++pass)
+    {
+        std::vector<Trainer::Spell const*> candidates;
+        for (uint32 trainerId : trainerIdCache[cls])
+        {
+            Trainer::Trainer* trainer = sObjectMgr->GetTrainer(trainerId);
+            if (!trainer || trainer->GetTrainerType() != Trainer::Type::Class || !trainer->IsTrainerValidForPlayer(bot))
+                continue;
+
+            for (auto const& spell : trainer->GetSpells())
+            {
+                if (seen.count(spell.SpellId) || !trainer->CanTeachSpell(bot, &spell))
+                    continue;
+                seen.insert(spell.SpellId);
+                candidates.push_back(&spell);
+            }
+        }
+
+        if (candidates.empty())
+            break;
+
+        std::sort(candidates.begin(), candidates.end(),
+                  [](Trainer::Spell const* a, Trainer::Spell const* b) { return a->ReqLevel < b->ReqLevel; });
+
+        uint32 learnedThisPass = 0;
+        for (Trainer::Spell const* spell : candidates)
+        {
+            if (!bot->HasEnoughMoney(int32(spell->MoneyCost)))
+                continue;
+
+            bot->ModifyMoney(-int32(spell->MoneyCost));
+            if (spell->IsCastable())
+                bot->CastSpell(bot, spell->SpellId, true);
+            else
+                bot->learnSpell(spell->SpellId, false);
+            ++learnedThisPass;
+        }
+
+        learned += learnedThisPass;
+        if (!learnedThisPass)
+            break;
+    }
+
+    return learned;
 }
 
 void PlayerbotFactory::InitClassSpells()

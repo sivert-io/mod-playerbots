@@ -91,6 +91,12 @@ Player* RandomPlayerbotFactory::CreateRandomBot(WorldSession* session, uint8 cls
 
     const uint8 race = raceOptions[urand(0, raceOptions.size() - 1)];
     const uint8 gender = urand(0, 1) ? GENDER_MALE : GENDER_FEMALE;
+    return CreateBot(session, race, cls, gender, nameCache);
+}
+
+Player* RandomPlayerbotFactory::CreateBot(WorldSession* session, uint8 race, uint8 cls, uint8 gender,
+                                          std::unordered_map<NameRaceAndGender, std::vector<std::string>>& nameCache)
+{
     const auto raceAndGender = CombineRaceAndGender(race, gender);
 
     std::string name;
@@ -144,6 +150,12 @@ Player* RandomPlayerbotFactory::CreateRandomBot(WorldSession* session, uint8 cls
     }
 
     //uint8 skinColor = skinColors[urand(0, skinColors.size() - 1)]; //not used, line marked for removal.
+    if (faces.empty() || hairs.empty())
+    {
+        LOG_ERROR("playerbots", "No character sections for race {} gender {}", race, gender);
+        return nullptr;
+    }
+
     std::pair<uint8, uint8> face = faces[urand(0, faces.size() - 1)];
     std::pair<uint8, uint8> hair = hairs[urand(0, hairs.size() - 1)];
 
@@ -178,6 +190,71 @@ Player* RandomPlayerbotFactory::CreateRandomBot(WorldSession* session, uint8 cls
             name.c_str(), race, cls);
 
     return player;
+}
+
+// Picks race and class for a new arrival: faction by AiPlayerbot.Arrivals.AllianceRatio, then a race/class
+// pair weighted by RaceWeights x ClassWeights among valid, enabled combinations of that faction.
+// Death knights are never picked (they cannot be created at level 1).
+bool RandomPlayerbotFactory::PickArrivalRaceClass(uint8& race, uint8& cls)
+{
+    bool const alliance = urand(1, 100) <= sPlayerbotAIConfig.arrivalsAllianceRatio;
+    uint32 const expansion = sWorld->getIntConfig(CONFIG_EXPANSION);
+
+    for (bool faction : {alliance, !alliance})
+    {
+        std::vector<std::pair<std::pair<uint8, uint8>, float>> options;
+        float total = 0.0f;
+        for (uint8 r = RACE_HUMAN; r < sRaceMgr->GetMaxRaces(); ++r)
+        {
+            if ((1 << (r - 1)) & sWorld->getIntConfig(CONFIG_CHARACTER_CREATING_DISABLED_RACEMASK))
+                continue;
+            if (IsAlliance(r) != faction)
+                continue;
+
+            auto raceWeight = sPlayerbotAIConfig.arrivalsRaceWeights.find(r);
+            if (raceWeight == sPlayerbotAIConfig.arrivalsRaceWeights.end() || raceWeight->second <= 0.0f)
+                continue;
+
+            for (uint8 c = CLASS_WARRIOR; c < MAX_CLASSES; ++c)
+            {
+                if (c == CLASS_DEATH_KNIGHT || !((1 << (c - 1)) & CLASSMASK_ALL_PLAYABLE) ||
+                    !sChrClassesStore.LookupEntry(c) ||
+                    ((1 << (c - 1)) & sWorld->getIntConfig(CONFIG_CHARACTER_CREATING_DISABLED_CLASSMASK)))
+                    continue;
+
+                auto classWeight = sPlayerbotAIConfig.arrivalsClassWeights.find(c);
+                if (classWeight == sPlayerbotAIConfig.arrivalsClassWeights.end() || classWeight->second <= 0.0f)
+                    continue;
+
+                if (!IsValidRaceClassCombination(r, c, expansion))
+                    continue;
+
+                float weight = raceWeight->second * classWeight->second;
+                options.push_back({{r, c}, weight});
+                total += weight;
+            }
+        }
+
+        if (options.empty() || total <= 0.0f)
+            continue;
+
+        float roll = frand(0.0f, total);
+        for (auto const& [pair, weight] : options)
+        {
+            roll -= weight;
+            if (roll <= 0.0f)
+            {
+                race = pair.first;
+                cls = pair.second;
+                return true;
+            }
+        }
+        race = options.back().first.first;
+        cls = options.back().first.second;
+        return true;
+    }
+
+    return false;
 }
 
 std::string const RandomPlayerbotFactory::CreateRandomBotName(NameRaceAndGender raceAndGender)
@@ -590,6 +667,25 @@ void RandomPlayerbotFactory::CreateRandomBots()
         LOG_INFO("playerbots", ">> Random bot accounts and data deleted in {} ms", GetMSTimeDiffToNow(timer));
         LOG_INFO("playerbots", "Please reset the AiPlayerbot.DeleteRandomBotAccounts to 0 and restart the server...");
         World::StopNow(SHUTDOWN_EXIT_CODE);
+        return;
+    }
+
+    if (sPlayerbotAIConfig.arrivalsEnabled)
+    {
+        // Arrivals create one account and character at a time at runtime (BotLifecycleMgr), so no
+        // accounts or characters are created here; existing bot accounts are only registered.
+        QueryResult result = LoginDatabase.Query("SELECT id FROM account WHERE username LIKE '{}%%' ORDER BY id",
+                                                 sPlayerbotAIConfig.randomBotAccountPrefix.c_str());
+        if (result)
+        {
+            do
+            {
+                sPlayerbotAIConfig.randomBotAccounts.push_back(result->Fetch()[0].Get<uint32>());
+            } while (result->NextRow());
+        }
+
+        LOG_INFO("server.loading", ">> Arrivals enabled: {} existing random bot accounts registered, no bulk creation",
+                 sPlayerbotAIConfig.randomBotAccounts.size());
         return;
     }
 
