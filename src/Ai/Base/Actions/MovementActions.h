@@ -80,7 +80,8 @@ private:
     const Movement::PointsArray SearchForBestPath(float x, float y, float z, float& modified_z, int maxSearchCount = 5,
                                                   bool normal_only = false, float step = 8.0f);
     bool wasMovementRestricted = false;
-    void DoMovePoint(Unit* unit, float x, float y, float z, bool generatePath, bool backwards);
+    // Returns extra milliseconds before the unit actually starts moving (realistic in-place turn).
+    uint32 DoMovePoint(Unit* unit, float x, float y, float z, bool generatePath, bool backwards);
 };
 
 class FleeAction : public MovementAction

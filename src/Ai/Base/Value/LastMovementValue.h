@@ -68,6 +68,15 @@ public:
     TravelPath lastPath;
     time_t nextTeleport;
     std::future<TravelPath> future;
+
+    // Realistic turning state. Deliberately not reset by clear() or copied: a delayed
+    // in-place turn event compares its token against this one, so resetting the token
+    // could let a stale event match a later turn and launch an outdated path.
+    uint32 turnToken = 0;
+    uint32 turnStartMs = 0;
+    float turnFromOri = 0.0f;
+    float turnAngle = 0.0f;  // signed, positive = counter-clockwise (turning left)
+    bool turnActive = false;
 };
 
 class LastMovementValue : public ManualSetValue<LastMovement&>

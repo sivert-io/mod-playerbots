@@ -18,7 +18,9 @@
 #include "RandomPlayerbotMgr.h"
 #include "Talentspec.h"
 #include "TravelMgr.h"
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <stdexcept>
 #include <iostream>
 #include <sstream>
@@ -163,6 +165,16 @@ bool PlayerbotAIConfig::Initialize()
     maxWaitForMove = sConfigMgr->GetOption<int32>("AiPlayerbot.MaxWaitForMove", 5000);
     disableMoveSplinePath = sConfigMgr->GetOption<int32>("AiPlayerbot.DisableMoveSplinePath", 0);
     maxMovementSearchTime = sConfigMgr->GetOption<int32>("AiPlayerbot.MaxMovementSearchTime", 3);
+    realisticTurningEnable = sConfigMgr->GetOption<bool>("AiPlayerbot.RealisticTurning.Enable", false);
+    realisticTurningTurnRate = std::max(0.1f, sConfigMgr->GetOption<float>("AiPlayerbot.RealisticTurning.TurnRate", static_cast<float>(M_PI)));
+    realisticTurningArcAngleThreshold = sConfigMgr->GetOption<float>("AiPlayerbot.RealisticTurning.ArcAngleThreshold", 45.0f) * static_cast<float>(M_PI) / 180.0f;
+    realisticTurningInPlaceTurnThreshold = sConfigMgr->GetOption<float>("AiPlayerbot.RealisticTurning.InPlaceTurnThreshold", 120.0f) * static_cast<float>(M_PI) / 180.0f;
+    realisticTurningArcStepAngle = std::max(5.0f, sConfigMgr->GetOption<float>("AiPlayerbot.RealisticTurning.ArcStepAngle", 15.0f)) * static_cast<float>(M_PI) / 180.0f;
+    realisticTurningInPlaceTurnMode = sConfigMgr->GetOption<int32>("AiPlayerbot.RealisticTurning.InPlaceTurnMode", 1);
+    realisticTurningMinMoveDistance = sConfigMgr->GetOption<float>("AiPlayerbot.RealisticTurning.MinMoveDistance", 3.0f);
+    realisticTurningSmoothCorners = sConfigMgr->GetOption<bool>("AiPlayerbot.RealisticTurning.SmoothCorners", false);
+    realisticTurningCornerMaxDeviation = sConfigMgr->GetOption<float>("AiPlayerbot.RealisticTurning.CornerMaxDeviation", 0.5f);
+    realisticTurningOnlyNearPlayers = sConfigMgr->GetOption<bool>("AiPlayerbot.RealisticTurning.OnlyNearPlayers", true);
     expireActionTime = sConfigMgr->GetOption<int32>("AiPlayerbot.ExpireActionTime", 5000);
     dispelAuraDuration = sConfigMgr->GetOption<int32>("AiPlayerbot.DispelAuraDuration", 700);
     reactDelay = sConfigMgr->GetOption<int32>("AiPlayerbot.ReactDelay", 100);

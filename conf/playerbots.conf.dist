@@ -362,6 +362,58 @@ AiPlayerbot.DisableMoveSplinePath = 0
 # Default: 3
 AiPlayerbot.MaxMovementSearchTime = 3
 
+# Realistic turning: make bots change direction like a human player instead of
+# snapping to the new heading when a MoveTo-style movement starts.
+# - Small heading changes (< ArcAngleThreshold) move as before.
+# - Medium changes get a short curved lead-in (like holding W while turning the camera).
+# - Large changes (>= InPlaceTurnThreshold) turn in place first (like A/D), then
+#   finish the rest of the turn on a short arc.
+# Only affects out-of-combat ground movement (not BG/arena, flying, swimming,
+# vehicles, transports, taxis, follow/chase generators or backwards movement).
+# Default: 0 (disabled, upstream behaviour)
+AiPlayerbot.RealisticTurning.Enable = 0
+
+# Turn rate in radians per second. Keyboard turning in the 3.3.5 client is pi (180 deg/s).
+# Also sets the lead-in arc radius (run speed / turn rate, ~2.2 yd running on foot).
+# Default: 3.14159
+AiPlayerbot.RealisticTurning.TurnRate = 3.14159
+
+# Heading change (degrees) at which a curved lead-in is added
+# Default: 45
+AiPlayerbot.RealisticTurning.ArcAngleThreshold = 45
+
+# Heading change (degrees) at which the bot turns in place before moving.
+# Only used when the bot is standing still; running bots always arc.
+# Default: 120
+AiPlayerbot.RealisticTurning.InPlaceTurnThreshold = 120
+
+# Angle (degrees) between generated arc points. Smaller = smoother but more spline points.
+# Default: 15
+AiPlayerbot.RealisticTurning.ArcStepAngle = 15
+
+# How in-place turns are shown to clients
+# 0 - no in-place turn (large turns use a lead-in arc when possible, else snap as before)
+# 1 - movement-flag turn: MSG_MOVE_START_TURN_* then MSG_MOVE_STOP_TURN (2 packets, client interpolates)
+# 2 - stepped facing: one facing update per ArcStepAngle (more packets, use if mode 1 looks wrong)
+# Default: 1
+AiPlayerbot.RealisticTurning.InPlaceTurnMode = 1
+
+# Moves shorter than this (yards) are not smoothed (small repositioning, following)
+# Default: 3.0
+AiPlayerbot.RealisticTurning.MinMoveDistance = 3.0
+
+# Also round sharp corners inside multi-point paths
+# Default: 0 (disabled)
+AiPlayerbot.RealisticTurning.SmoothCorners = 0
+
+# Max distance (yards) a rounded corner may cut inside the original navmesh corner
+# Default: 0.5
+AiPlayerbot.RealisticTurning.CornerMaxDeviation = 0.5
+
+# Only smooth movement when a real player is within sight distance (saves CPU with many bots)
+# Default: 1
+AiPlayerbot.RealisticTurning.OnlyNearPlayers = 1
+
 # Action expiration time
 AiPlayerbot.ExpireActionTime = 5000
 

@@ -24,6 +24,7 @@
 #include "Position.h"
 #include "PositionValue.h"
 #include "Random.h"
+#include "RealisticTurning.h"
 #include "ServerFacade.h"
 #include "SharedDefines.h"
 #include "SpellAuraEffects.h"
@@ -72,6 +73,7 @@ bool MovementAction::JumpTo(uint32 mapId, float x, float y, float z, MovementPri
         return false;
 
     float speed = bot->GetSpeed(MOVE_RUN);
+    RealisticTurning::CancelTurn(botAI, bot);
     MotionMaster& mm = *bot->GetMotionMaster();
     mm.Clear();
     mm.MoveJump(x, y, z, speed, speed, 1);
@@ -221,8 +223,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool /*idle
 
             // bot->CastStop();
 
-            DoMovePoint(bot, x, y, z, generatePath, backwards);
-            float delay = 1000.0f * MoveDelay(distance, backwards);
+            uint32 const turnDelay = DoMovePoint(bot, x, y, z, generatePath, backwards);
+            float delay = 1000.0f * MoveDelay(distance, backwards) + turnDelay;
             if (lessDelay)
             {
                 delay -= botAI->GetReactDelay();
@@ -248,8 +250,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool /*idle
 
             // bot->CastStop();
 
-            DoMovePoint(bot, x, y, modifiedZ, generatePath, backwards);
-            float delay = 1000.0f * MoveDelay(distance, backwards);
+            uint32 const turnDelay = DoMovePoint(bot, x, y, modifiedZ, generatePath, backwards);
+            float delay = 1000.0f * MoveDelay(distance, backwards) + turnDelay;
             if (lessDelay)
             {
                 delay -= botAI->GetReactDelay();
@@ -1250,6 +1252,7 @@ bool MovementAction::Follow(Unit* target, float distance, float angle)
     if (bot->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE)
         bot->GetMotionMaster()->Clear();
 
+    RealisticTurning::CancelTurn(botAI, bot);
     bot->GetMotionMaster()->MoveFollow(target, distance, angle);
     return true;
 }
@@ -1280,6 +1283,7 @@ bool MovementAction::ChaseTo(WorldObject* obj, float distance)
     bot->CastStop();
 
     // bot->GetMotionMaster()->Clear();
+    RealisticTurning::CancelTurn(botAI, bot);
     bot->GetMotionMaster()->MoveChase((Unit*)obj, distance);
 
     // TODO shouldnt this use "last movement" value?
@@ -1765,20 +1769,32 @@ const Movement::PointsArray MovementAction::SearchForBestPath(float x, float y, 
     return result;
 }
 
-void MovementAction::DoMovePoint(Unit* unit, float x, float y, float z, bool generatePath, bool backwards)
+uint32 MovementAction::DoMovePoint(Unit* unit, float x, float y, float z, bool generatePath, bool backwards)
 {
     if (!unit)
-        return;
+        return 0;
 
     MotionMaster* mm = unit->GetMotionMaster();
     if (!mm)
-        return;
+        return 0;
 
     // bot water collision correction
     if (unit->HasUnitMovementFlag(MOVEMENTFLAG_WATERWALKING) && unit->HasWaterWalkAura())
     {
         float gZ = unit->GetMapWaterOrGroundLevel(unit->GetPositionX(), unit->GetPositionY(), unit->GetPositionZ());
         unit->UpdatePosition(unit->GetPositionX(), unit->GetPositionY(), gZ, false);
+    }
+
+    if (unit == bot)
+    {
+        // A newer move always wins over a turn that is still in progress.
+        RealisticTurning::CancelTurn(botAI, bot);
+
+        // Backwards moves are deliberate (kiting, tank repositioning) and must keep facing.
+        // generatePath == false means flying/swimming straight 3D splines.
+        uint32 turnDelay = 0;
+        if (!backwards && generatePath && RealisticTurning::TryMove(botAI, bot, x, y, z, turnDelay))
+            return turnDelay;
     }
 
     mm->Clear();
@@ -1789,7 +1805,7 @@ void MovementAction::DoMovePoint(Unit* unit, float x, float y, float z, bool gen
             /*coords*/ x, y, z,
             /*generatePath*/ generatePath,
             /*forceDestination*/ false);
-        return;
+        return 0;
     }
     else
     {
@@ -1802,6 +1818,7 @@ void MovementAction::DoMovePoint(Unit* unit, float x, float y, float z, bool gen
             /*generatePath*/ generatePath,  // true => terrain path (2d mmap); false => straight spline (3d vmap)
             /*forceDestination*/ false);
     }
+    return 0;
 }
 
 bool FleeAction::Execute(Event /*event*/)
