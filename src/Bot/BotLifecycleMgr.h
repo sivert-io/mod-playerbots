@@ -135,13 +135,21 @@ private:
     BotPersona GeneratePersona(uint32 guid, uint32 accountId, uint8 race, uint8 cls, uint32 now);
     uint32 ScheduleNextLogin(BotPersona const& persona, uint32 from, uint32 sessionSeconds);
     uint32 AlignToChronotype(BotPersona const& persona, uint32 target, uint32 earliest, uint32 maxShift);
-    float SampleArrivalHour();
+    // Sign-up hour drawn from HourWeights, truncated to [minHour, 24)
+    float SampleArrivalHour(float minHour = 0.0f);
 
     void MaintainPersonas(uint32 now);
     uint32 GetWeekStart(uint32 now) const;
     void EnsureWeekPlan(uint32 now);
+    // Expected share [0, 1] of a week's arrivals at or after `from` (weekday and hour weights)
+    float RemainingWeekShare(uint32 weekStart, uint32 from) const;
+    // `count` arrival times in [max(from, now), weekStart + 7 days), spread like a weekly plan; perDay gets the day counts
+    std::vector<uint32> DrawWeekSlots(uint32 weekStart, uint32 from, uint32 now, uint32 count, std::array<uint32, 7>& perDay);
+    void ReloadPendingArrivals();
+    void SpreadArrivalBacklog(uint32 now);
     void ProcessArrivals(uint32 now);
     void FinishArrival(char const* status);
+    void LogArrivalStats(uint32 now);
 
     bool initialized = false;
     mutable std::shared_mutex personaLock;
@@ -152,10 +160,13 @@ private:
     bool hasActiveArrival = false;
     uint32 nextAccountIndex = 0;
     uint32 plannedWeekStart = 0;
+    std::deque<uint32> recentArrivalStarts;  // start times of arrivals in the last hour (MaxPerHour)
+    uint32 arrivalsDeferred = 0;             // times an arrival waited for MaxPerHour since the last stats line
 
     uint32 nextMaintenance = 0;
     uint32 nextWeekCheck = 0;
     uint32 nextArrivalStep = 0;
+    uint32 nextArrivalStats = 0;
 
     std::mt19937 rng{std::random_device{}()};
 };

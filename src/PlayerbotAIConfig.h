@@ -355,6 +355,9 @@ public:
     uint32 arrivalsPerYear;
     uint32 arrivalsCap;
     float arrivalsDayShape;
+    bool arrivalsScaleMidWeek;              // a week planned after it started gets the share still ahead
+    uint32 arrivalsBacklogSpreadMinutes;    // overdue arrivals at startup are spread over this window
+    uint32 arrivalsMaxPerHour;              // rolling one hour cap on arrivals started (0 = no cap)
     std::vector<float> arrivalsWeekdayWeights;                  // Monday .. Sunday
     std::vector<std::pair<float, float>> arrivalsHourPoints;    // (local hour, weight)
     uint32 arrivalsAllianceRatio;

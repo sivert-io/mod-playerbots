@@ -932,6 +932,25 @@ AiPlayerbot.Arrivals.Enable = 0
 # Default: 5000
 AiPlayerbot.Arrivals.PerYear = 5000
 
+# A week planned after it started (first start mid-week, or start after downtime across a Monday)
+# plans only the time still ahead: fully past days get no arrivals, today gets sign-up hours from now on
+# (same HourWeights, truncated). 1 = the budget is scaled to the expected share of the week's arrivals
+# still ahead (weekday and hour weights), so arrivals per year stay at PerYear while the server is up;
+# 0 = the full weekly budget is packed into the rest of the week. Each week's plan is recorded in
+# acore_playerbots.astro_bot_arrival_weeks and logged to the server log.
+# Default: 1
+AiPlayerbot.Arrivals.ScaleMidWeek = 1
+
+# Arrivals that were due while the server was down are not dropped: at startup they are spread evenly,
+# in their original order, over the next BacklogSpreadMinutes (0 = all due at once, MaxPerHour still applies)
+# Default: 180
+AiPlayerbot.Arrivals.BacklogSpreadMinutes = 180
+
+# At most this many arrivals start in any rolling hour; the rest wait (still pending) until there is room
+# (0 = no cap)
+# Default: 8
+AiPlayerbot.Arrivals.MaxPerHour = 8
+
 # No more arrivals once this many bots exist (quit bots included)
 # Default: 5000
 AiPlayerbot.Arrivals.Cap = 5000
