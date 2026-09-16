@@ -40,6 +40,15 @@ bool SendMailAction::Execute(Event event)
     if (!receiver || receiver == bot)
         return false;
 
+    // Random bots do not mail their items to players on request (sendmail is reachable by anyone, even
+    // through channel chat) unless player control of random bots is on
+    if (randomBot && !sPlayerbotAIConfig.randomBotPlayerControl)
+    {
+        Player* requester = event.getOwner();
+        if (!requester || !requester->CanBeGameMaster())
+            return false;
+    }
+
     if (!tellTo)
         tellTo = receiver;
 
