@@ -18,6 +18,7 @@
 #include "ObjectGuid.h"
 #include "ObjectMgr.h"
 #include "PlayerbotAIConfig.h"
+#include "PlayerbotControlPolicy.h"
 #include "PlayerbotFactory.h"
 #include "PlayerbotGuildMgr.h"
 #include "PlayerbotOperations.h"
@@ -98,18 +99,26 @@ void PlayerbotHolder::AddPlayerBot(ObjectGuid playerGuid, uint32 masterAccountId
     WorldSession* masterSession = masterAccountId ? sWorldSessionMgr->FindSession(masterAccountId) : nullptr;
     Player* masterPlayer = masterSession ? masterSession->GetPlayer() : nullptr;
 
-    bool isRndbot = !masterAccountId;
-    bool sameAccount = sPlayerbotAIConfig.allowAccountBots && accountId == masterAccountId;
+    PlayerbotControlPolicy::AltBotRequest request;
+    request.allowAccountBots = sPlayerbotAIConfig.allowAccountBots;
+    request.allowGuildBots = sPlayerbotAIConfig.allowGuildBots;
+    request.allowTrustedAccountBots = sPlayerbotAIConfig.allowTrustedAccountBots;
+    request.randomBotPlayerControl = sPlayerbotAIConfig.randomBotPlayerControl;
+    request.randomBotManager = !masterAccountId;
+    request.masterIsGameMaster = masterPlayer && masterPlayer->CanBeGameMaster();
+    request.sameAccount = accountId == masterAccountId;
     Guild* guild = masterPlayer ? sGuildMgr->GetGuildById(masterPlayer->GetGuildId()) : nullptr;
-    bool sameGuild = sPlayerbotAIConfig.allowGuildBots && guild && guild->GetMember(playerGuid);
-    bool addClassBot = sRandomPlayerbotMgr.IsAddclassBot(playerGuid.GetCounter());
-    bool linkedAccount = sPlayerbotAIConfig.allowTrustedAccountBots && IsAccountLinked(accountId, masterAccountId);
+    request.sameGuild = sPlayerbotAIConfig.allowGuildBots && guild && guild->GetMember(playerGuid);
+    request.addClassBot = sRandomPlayerbotMgr.IsAddclassBot(playerGuid.GetCounter());
+    request.linkedAccount = sPlayerbotAIConfig.allowTrustedAccountBots && masterAccountId &&
+                            IsAccountLinked(accountId, masterAccountId);
+    request.targetIsRandomBotAccount = sPlayerbotAIConfig.IsInRandomAccountList(accountId);
 
     bool allowed = true;
     std::ostringstream out;
     std::string botName;
     sCharacterCache->GetCharacterNameByGuid(playerGuid, botName);
-    if (!isRndbot && !sameAccount && !sameGuild && !addClassBot && !linkedAccount)
+    if (!PlayerbotControlPolicy::CanAddAltBot(request))
     {
         allowed = false;
         out << "Failure: You are not allowed to control bot " << botName.c_str();
@@ -1839,17 +1848,15 @@ void PlayerbotMgr::HandleSetSecurityKeyCommand(Player* player, std::string const
 
 void PlayerbotMgr::HandleLinkAccountCommand(Player* player, std::string const& accountName, std::string const& key)
 {
-    QueryResult result = LoginDatabase.Query("SELECT id FROM account WHERE username = '{}'", accountName);
-    if (!result)
+    // Resolve the name with a prepared statement: the name comes straight from chat
+    uint32 linkedAccountId = AccountMgr::GetId(accountName);
+    if (!linkedAccountId)
     {
         ChatHandler(player->GetSession()).PSendSysMessage("Account not found.");
         return;
     }
 
-    Field* fields = result->Fetch();
-    uint32 linkedAccountId = fields[0].Get<uint32>();
-
-    result = PlayerbotsDatabase.Query("SELECT security_key FROM playerbots_account_keys WHERE account_id = {}", linkedAccountId);
+    QueryResult result = PlayerbotsDatabase.Query("SELECT security_key FROM playerbots_account_keys WHERE account_id = {}", linkedAccountId);
     if (!result)
     {
         ChatHandler(player->GetSession()).PSendSysMessage("Invalid security key.");
@@ -1917,15 +1924,14 @@ void PlayerbotMgr::HandleViewLinkedAccountsCommand(Player* player)
 
 void PlayerbotMgr::HandleUnlinkAccountCommand(Player* player, std::string const& accountName)
 {
-    QueryResult result = LoginDatabase.Query("SELECT id FROM account WHERE username = '{}'", accountName);
-    if (!result)
+    // Resolve the name with a prepared statement: the name comes straight from chat
+    uint32 linkedAccountId = AccountMgr::GetId(accountName);
+    if (!linkedAccountId)
     {
         ChatHandler(player->GetSession()).PSendSysMessage("Account not found.");
         return;
     }
 
-    Field* fields = result->Fetch();
-    uint32 linkedAccountId = fields[0].Get<uint32>();
     uint32 accountId = player->GetSession()->GetAccountId();
 
     PlayerbotsDatabase.Execute("DELETE FROM playerbots_account_links WHERE (account_id = {} AND linked_account_id = {}) OR (account_id = {} AND linked_account_id = {})",

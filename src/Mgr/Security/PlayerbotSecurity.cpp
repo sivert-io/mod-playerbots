@@ -7,6 +7,7 @@
 #include "PlayerbotSecurity.h"
 #include "LFGMgr.h"
 #include "PlayerbotAIConfig.h"
+#include "PlayerbotControlPolicy.h"
 #include "Playerbots.h"
 
 PlayerbotSecurity::PlayerbotSecurity(Player* const bot) : bot(bot)
@@ -64,7 +65,16 @@ PlayerbotSecurityLevel PlayerbotSecurity::LevelFor(Player* from, DenyReason* rea
         if (fromGroup && botGroup && fromGroup == botGroup && !ignoreGroup)
         {
             if (botAI->GetMaster() == from)
-                return PLAYERBOT_SECURITY_ALLOW_ALL;
+            {
+                // GMs returned ALLOW_ALL above
+                if (PlayerbotControlPolicy::RandomBotObeysMaster(false, sPlayerbotAIConfig.randomBotPlayerControl))
+                    return PLAYERBOT_SECURITY_ALLOW_ALL;
+
+                if (reason)
+                    *reason = PLAYERBOT_DENY_NO_CONTROL;
+
+                return PLAYERBOT_SECURITY_TALK;
+            }
 
             if (reason)
                 *reason = PLAYERBOT_DENY_NOT_YOURS;
@@ -179,7 +189,8 @@ bool PlayerbotSecurity::CheckLevelFor(PlayerbotSecurityLevel level, bool silent,
         return true;
 
     PlayerbotAI* fromBotAI = GET_PLAYERBOT_AI(from);
-    if (silent || (fromBotAI && !IsSelfBot(from)))
+    // An autonomous random bot ignores orders without explaining itself
+    if (silent || (fromBotAI && !IsSelfBot(from)) || reason == PLAYERBOT_DENY_NO_CONTROL)
         return false;
 
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);

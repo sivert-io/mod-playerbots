@@ -160,6 +160,15 @@ AiPlayerbot.AllowGuildBots = 1
 # Allow linking accounts for shared altbot control
 AiPlayerbot.AllowTrustedAccountBots = 1
 
+# Let normal players command random bots (Astro Realm)
+# 0 = random bots are autonomous: a player who groups with one becomes its master for following, but the
+#     bot ignores their commands (give, trade, destroy, sell, summon, equip, sendmail ...), does not
+#     teleport to them on invite, and can never be logged in as someone's alt bot. GMs keep full control.
+#     Party invites, the normal trade window and chat still work.
+# 1 = upstream behavior: the grouped master has full control of the random bot
+# Default: 0
+AiPlayerbot.RandomBotPlayerControl = 0
+
 # Randombots will create guilds with nearby randombots
 # Note: currently, randombots will not invite more bots after a guild is created,
 # meaning randombot guilds will have only the 10 initial randombots needed to sign the charter

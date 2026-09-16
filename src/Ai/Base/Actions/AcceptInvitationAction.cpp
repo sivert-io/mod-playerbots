@@ -8,6 +8,7 @@
 #include "Event.h"
 #include "ObjectAccessor.h"
 #include "PlayerbotAIConfig.h"
+#include "PlayerbotControlPolicy.h"
 #include "PlayerbotSecurity.h"
 #include "PlayerbotTextMgr.h"
 #include "Playerbots.h"
@@ -58,7 +59,12 @@ bool AcceptInvitationAction::Execute(Event event)
 
     botAI->TellMaster(PlayerbotTextMgr::instance().GetBotTextOrDefault("hello", "Hello", {}));
 
-    if (sPlayerbotAIConfig.summonWhenGroup && bot->GetDistance(inviter) > sPlayerbotAIConfig.sightDistance)
+    // Autonomous random bots travel to the group themselves instead of teleporting to whoever invited them
+    bool const obeysInviter = !sRandomPlayerbotMgr.IsRandomBot(bot) ||
+                              PlayerbotControlPolicy::RandomBotObeysMaster(inviter->CanBeGameMaster(),
+                                                                           sPlayerbotAIConfig.randomBotPlayerControl);
+    if (obeysInviter && sPlayerbotAIConfig.summonWhenGroup &&
+        bot->GetDistance(inviter) > sPlayerbotAIConfig.sightDistance)
     {
         Teleport(inviter, bot, true);
     }
