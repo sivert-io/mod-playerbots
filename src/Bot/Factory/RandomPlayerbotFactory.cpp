@@ -14,6 +14,7 @@
 #include "Log.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
+#include "PlayerbotControlPolicy.h"
 #include "PlayerbotOperations.h"
 #include "PlayerbotWorldThreadProcessor.h"
 #include "RaceMgr.h"
@@ -268,6 +269,7 @@ std::string const RandomPlayerbotFactory::CreateRandomBotName(NameRaceAndGender 
             "FROM playerbots_names n "
             "LEFT OUTER JOIN characters c ON c.name = n.name "
             "WHERE c.guid IS NULL and n.gender = '{}' "
+            "AND n.name NOT LIKE '%bot%' "
             "ORDER BY RAND() LIMIT 1",
             static_cast<uint8>(raceAndGender));
         if (!result)
@@ -277,6 +279,8 @@ std::string const RandomPlayerbotFactory::CreateRandomBotName(NameRaceAndGender 
 
         Field* fields = result->Fetch();
         botName = fields[0].Get<std::string>();
+        if (PlayerbotControlPolicy::NameRevealsBot(botName))
+            continue;
         if (ObjectMgr::CheckPlayerName(botName) == CHAR_NAME_SUCCESS)  // Checks for reservation & profanity, too
         {
             CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHECK_NAME);
@@ -344,7 +348,8 @@ std::string const RandomPlayerbotFactory::CreateRandomBotName(NameRaceAndGender 
         // Capitalize first letter
         botName[0] -= 32;
 
-        if (ObjectMgr::CheckPlayerName(botName) != CHAR_NAME_SUCCESS) // Checks for reservation & profanity, too
+        if (ObjectMgr::CheckPlayerName(botName) != CHAR_NAME_SUCCESS || // Checks for reservation & profanity, too
+            PlayerbotControlPolicy::NameRevealsBot(botName))
         {
             botName.clear();
             continue;
@@ -369,7 +374,8 @@ std::string const RandomPlayerbotFactory::CreateRandomBotName(NameRaceAndGender 
         {
             botName += (i == 0 ? 'A' : 'a') + rand() % 26;
         }
-        if (ObjectMgr::CheckPlayerName(botName) != CHAR_NAME_SUCCESS)  // Checks for reservation & profanity, too
+        if (ObjectMgr::CheckPlayerName(botName) != CHAR_NAME_SUCCESS ||  // Checks for reservation & profanity, too
+            PlayerbotControlPolicy::NameRevealsBot(botName))
         {
             botName.clear();
             continue;
@@ -784,7 +790,8 @@ void RandomPlayerbotFactory::CreateRandomBots()
                 Field* fields = result->Fetch();
                 std::string name = fields[0].Get<std::string>();
                 NameRaceAndGender raceAndGender = static_cast<NameRaceAndGender>(fields[1].Get<uint8>());
-                if (sObjectMgr->CheckPlayerName(name) == CHAR_NAME_SUCCESS)
+                if (sObjectMgr->CheckPlayerName(name) == CHAR_NAME_SUCCESS &&
+                    !PlayerbotControlPolicy::NameRevealsBot(name))
                 {
                     CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHECK_NAME);
                     stmt->SetData(0, name);

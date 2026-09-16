@@ -35,6 +35,10 @@
 #include "PerfMonitor.h"
 #include "Player.h"
 #include "PlayerbotAIConfig.h"
+#include "PlayerbotControlPolicy.h"
+#include "IdlePosturePolicy.h"
+#include <limits>
+#include "NearestGameObjects.h"
 #include "PlayerbotGuildMgr.h"
 #include "PlayerbotMgr.h"
 #include "PlayerbotTextMgr.h"
@@ -602,6 +606,13 @@ void PlayerbotAI::HandleCommand(uint32 type, std::string const& text, Player& fr
     if (!bot)
         return;
 
+    // A persona bot that takes no orders does not treat chat as commands at all: "who", "wts", "invite"
+    // and friends would otherwise answer with stat lines and price lists
+    if (!PlayerbotControlPolicy::AcceptsChatCommands(sPlayerbotAIConfig.IsInRandomAccountList(accountId),
+                                                     fromPlayer.CanBeGameMaster(), &fromPlayer == bot,
+                                                     sPlayerbotAIConfig.randomBotPlayerControl))
+        return;
+
     std::string filtered = text;
 
     if (!IsAllowedCommand(filtered) && !GetSecurity()->CheckLevelFor(PlayerbotSecurityLevel::PLAYERBOT_SECURITY_INVITE,
@@ -949,6 +960,12 @@ bool PlayerbotAI::IsAllowedCommand(std::string const text)
 
 void PlayerbotAI::HandleCommand(uint32 type, std::string const text, Player* fromPlayer)
 {
+    if (!bot || !fromPlayer ||
+        !PlayerbotControlPolicy::AcceptsChatCommands(sPlayerbotAIConfig.IsInRandomAccountList(accountId),
+                                                     fromPlayer->CanBeGameMaster(), fromPlayer == bot,
+                                                     sPlayerbotAIConfig.randomBotPlayerControl))
+        return;
+
     if (!GetSecurity()->CheckLevelFor(PLAYERBOT_SECURITY_INVITE, type != CHAT_MSG_WHISPER, fromPlayer))
         return;
 
@@ -1541,11 +1558,18 @@ void PlayerbotAI::DoNextAction(bool min)
         SetNextCheckDelay(sPlayerbotAIConfig.passiveDelay);
         return;
     }
-    else if (bot->isAFK() && !IsSelfBot(bot))
-        bot->ToggleAFK();
+    else if (bot->isAFK() && !IsSelfBot(bot) && rpgInfo.GetStatus() != RPG_SOCIAL_AFK)
+        bot->ToggleAFK();  // a social AFK break keeps its flag until the break ends
 
     if (master && master->IsInWorld())
     {
+        if (danceDurationMs)
+        {
+            if (bot->GetUInt32Value(UNIT_NPC_EMOTESTATE) == EMOTE_STATE_DANCE)
+                bot->SetUInt32Value(UNIT_NPC_EMOTESTATE, EMOTE_ONESHOT_NONE);
+            danceDurationMs = 0;
+        }
+
         float distance = ServerFacade::instance().GetDistance2d(bot, master);
 
         if (master->m_movementInfo.HasMovementFlag(MOVEMENTFLAG_WALKING) && distance < 20.0f)
@@ -1563,8 +1587,8 @@ void PlayerbotAI::DoNextAction(bool min)
     }
     else if (bot->m_movementInfo.HasMovementFlag(MOVEMENTFLAG_WALKING))
         bot->m_movementInfo.RemoveMovementFlag(MOVEMENTFLAG_WALKING);
-    else if ((nextAICheckDelay < 1000) && bot->IsSitState())
-        bot->SetStandState(UNIT_STAND_STATE_STAND);
+    else if (nextAICheckDelay < 1000)
+        UpdateIdlePosture();  // without the feature: stands a sitting bot up, as before
 
     bool hasMountAura = bot->HasAuraType(SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED) ||
                         bot->HasAuraType(SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED);
@@ -1573,6 +1597,152 @@ void PlayerbotAI::DoNextAction(bool min)
         bot->RemoveAurasByType(SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED);
         bot->RemoveAurasByType(SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED);
     }
+}
+
+void PlayerbotAI::UpdateIdlePosture()
+{
+    IdlePosturePolicy::Settings s;
+    s.enabled = sPlayerbotAIConfig.idleSitEnable && sRandomPlayerbotMgr.IsRandomBot(bot);
+    s.minIdleMs = sPlayerbotAIConfig.idleSitMinIdleMs;
+    s.maxIdleMs = sPlayerbotAIConfig.idleSitMaxIdleMs;
+    s.openWorldFactor = sPlayerbotAIConfig.idleSitOpenWorldFactor;
+    s.sitChancePct = sPlayerbotAIConfig.idleSitChancePct;
+    s.danceChancePct = sPlayerbotAIConfig.idleDanceChancePct;
+    s.danceMinMs = sPlayerbotAIConfig.idleDanceMinMs;
+    s.danceMaxMs = sPlayerbotAIConfig.idleDanceMaxMs;
+    s.danceCooldownMs = sPlayerbotAIConfig.idleDanceCooldownMs;
+
+    uint32 const now = getMSTime();
+
+    IdlePosturePolicy::Facts f;
+    f.alive = bot->IsAlive();
+    f.inCombat = bot->IsInCombat();
+    f.moving = bot->isMoving();
+    f.mounted = bot->IsMounted();
+    f.casting = bot->IsNonMeleeSpellCast(false);
+    f.swimming = bot->IsInWater();
+    f.inFlight = bot->IsInFlight() || bot->GetTransport();
+    f.inRestArea = bot->HasFlag(PLAYER_FLAGS, PLAYER_FLAGS_RESTING);
+    f.sitting = bot->IsSitState();
+
+    switch (rpgInfo.GetStatus())
+    {
+        case RPG_REST:
+            f.activity = IdlePosturePolicy::Activity::Resting;
+            break;
+        case RPG_SOCIAL_AFK:
+            f.activity = IdlePosturePolicy::Activity::SocialAfk;
+            break;
+        case RPG_WANDER_NPC:
+            f.activity = IdlePosturePolicy::Activity::Errands;
+            break;
+        default:
+            f.activity = IdlePosturePolicy::Activity::Other;
+            break;
+    }
+
+    // Anything that moves the bot or keeps it busy restarts the idle clock
+    bool const moved = bot->GetExactDist2d(idleLastX, idleLastY) > 1.0f;
+    if (!idleSinceMs || moved || IdlePosturePolicy::Busy(f))
+    {
+        idleSinceMs = now;
+        idleSpellRoll = urand(0, 99);
+        idleLastX = bot->GetPositionX();
+        idleLastY = bot->GetPositionY();
+    }
+    f.idleMs = getMSTimeDiff(idleSinceMs, now);
+
+    if (danceDurationMs)
+    {
+        if (!IdlePosturePolicy::ShouldStopDance(f, getMSTimeDiff(danceStartMs, now), danceDurationMs))
+            return;
+
+        if (bot->GetUInt32Value(UNIT_NPC_EMOTESTATE) == EMOTE_STATE_DANCE)
+            bot->SetUInt32Value(UNIT_NPC_EMOTESTATE, EMOTE_ONESHOT_NONE);
+        danceDurationMs = 0;
+        lastDanceMs = now;
+    }
+
+    // Walked over to a chair: sit on it now rather than waiting all over again
+    if (!idleChair.IsEmpty() && !IdlePosturePolicy::Busy(f))
+    {
+        GameObject* chair = ObjectAccessor::GetGameObject(*bot, idleChair);
+        idleChair.Clear();
+        if (chair && chair->isSpawned() && bot->GetExactDist2d(chair) <= 1.5f)
+        {
+            chair->Use(bot);
+            return;
+        }
+    }
+
+    switch (IdlePosturePolicy::Decide(f, bot->GetGUID().GetCounter(), idleSpellRoll, s))
+    {
+        case IdlePosturePolicy::Posture::Stand:
+            if (bot->IsSitState())
+                bot->SetStandState(UNIT_STAND_STATE_STAND);
+            return;
+        case IdlePosturePolicy::Posture::Sit:
+            if (!f.sitting)
+                SitDownIdle(f.inRestArea);
+            return;
+        default:
+            break;
+    }
+
+    // A dance is considered twice a minute at most
+    if (!s.enabled || (lastDanceCheckMs && getMSTimeDiff(lastDanceCheckMs, now) < 30 * IN_MILLISECONDS))
+        return;
+    lastDanceCheckMs = now;
+
+    uint32 const sinceDance = lastDanceMs ? getMSTimeDiff(lastDanceMs, now) : std::numeric_limits<uint32>::max();
+    if (IdlePosturePolicy::ShouldStartDance(f, bot->GetGUID().GetCounter(), idleSpellRoll, urand(0, 99), sinceDance,
+                                            s))
+    {
+        bot->SetUInt32Value(UNIT_NPC_EMOTESTATE, EMOTE_STATE_DANCE);
+        danceStartMs = now;
+        danceDurationMs = urand(s.danceMinMs, s.danceMaxMs);
+    }
+}
+
+void PlayerbotAI::SitDownIdle(bool inRestArea)
+{
+    if (inRestArea && sPlayerbotAIConfig.idleSitUseChairs)
+    {
+        std::list<GameObject*> objects;
+        AnyGameObjectInObjectRangeCheck check(bot, 8.0f);
+        Acore::GameObjectListSearcher<AnyGameObjectInObjectRangeCheck> searcher(bot, objects, check);
+        Cell::VisitObjects(bot, searcher, 8.0f);
+
+        GameObject* chair = nullptr;
+        float best = 8.0f;
+        for (GameObject* go : objects)
+        {
+            if (!go || !go->isSpawned() || go->GetGoType() != GAMEOBJECT_TYPE_CHAIR)
+                continue;
+            float const dist = bot->GetExactDist2d(go);
+            if (dist < best && std::fabs(go->GetPositionZ() - bot->GetPositionZ()) < 2.0f && bot->IsWithinLOSInMap(go))
+            {
+                best = dist;
+                chair = go;
+            }
+        }
+
+        if (chair)
+        {
+            if (best <= 1.5f)
+            {
+                chair->Use(bot);
+                return;
+            }
+
+            // Walk over; UpdateIdlePosture sits down once there
+            idleChair = chair->GetGUID();
+            bot->GetMotionMaster()->MovePoint(0, chair->GetPositionX(), chair->GetPositionY(), chair->GetPositionZ());
+            return;
+        }
+    }
+
+    bot->SetStandState(UNIT_STAND_STATE_SIT);
 }
 
 void PlayerbotAI::ReInitCurrentEngine()

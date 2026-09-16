@@ -334,6 +334,14 @@ public:
     // RPG social AFK break duration (seconds)
     uint32 rpgSocialAfkMinTime, rpgSocialAfkMaxTime;
 
+    // Idle posture: random bots hanging around sit down after a while, stand before moving,
+    // and dance a little in town now and then (IdlePosturePolicy)
+    bool idleSitEnable;
+    uint32 idleSitMinIdleMs, idleSitMaxIdleMs, idleSitOpenWorldFactor, idleSitChancePct;
+    bool idleSitUseChairs;
+    uint32 idleDanceChancePct, idleDanceMinMs, idleDanceMaxMs, idleDanceCooldownMs;
+    uint32 rpgRestMinTime, rpgRestMaxTime;  // seconds
+
     // Gradual sign-ups: hold back low level bots and release them over time
     bool signupsEnabled;
     uint32 signupsMaxLevel;

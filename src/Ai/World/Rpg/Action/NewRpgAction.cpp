@@ -98,7 +98,8 @@ bool TellRpgStatusAction::Execute(Event event)
     else if (status == RPG_REST)
     {
         info.ChangeToRest();
-        bot->SetStandState(UNIT_STAND_STATE_SIT);
+        if (!sPlayerbotAIConfig.idleSitEnable)
+            bot->SetStandState(UNIT_STAND_STATE_SIT);
         WhisperStatusChange(owner, "REST");
         return true;
     }
@@ -330,8 +331,15 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
         }
         case RPG_REST:
         {
-            // REST -> IDLE
-            if (info.HasStatusPersisted(statusRestDuration))
+            // REST -> IDLE. With idle sitting a break is long enough to settle down and sit: a stable
+            // per-break length between RpgRest.MinTime and MaxTime
+            uint32 restDuration = statusRestDuration;
+            if (sPlayerbotAIConfig.idleSitEnable)
+            {
+                uint32 const span = sPlayerbotAIConfig.rpgRestMaxTime - sPlayerbotAIConfig.rpgRestMinTime + 1;
+                restDuration = (sPlayerbotAIConfig.rpgRestMinTime + info.startT % span) * IN_MILLISECONDS;
+            }
+            if (info.HasStatusPersisted(restDuration))
             {
                 info.ChangeToIdle();
                 return true;
@@ -359,7 +367,8 @@ bool NewRpgStatusUpdateAction::Execute(Event /*event*/)
                     data.nextEmoteT = getMSTime() + urand(30, 120) * IN_MILLISECONDS;
                     bot->StopMoving();
                     bot->SetPlayerFlag(PLAYER_FLAGS_AFK);
-                    if (urand(0, 1))
+                    // With idle sitting the bot settles in first and sits (or finds a chair) later
+                    if (!sPlayerbotAIConfig.idleSitEnable && urand(0, 1))
                         bot->SetStandState(UNIT_STAND_STATE_SIT);
                     return true;
                 }

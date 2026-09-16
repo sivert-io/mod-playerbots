@@ -12,11 +12,17 @@
 #include "GridNotifiersImpl.h"
 #include "NearestGameObjects.h"
 #include "PlayerbotAI.h"
+#include "PlayerbotAIConfig.h"
+#include "RandomPlayerbotMgr.h"
 #include "ServerFacade.h"
 
 bool RevealGatheringItemAction::Execute(Event /*event*/)
 {
     if (!bot->GetGroup())
+        return false;
+
+    // "I see a [Copper Vein]. Should we go nearer?" is canned bot talk
+    if (!sPlayerbotAIConfig.randomBotTalk && sRandomPlayerbotMgr.IsRandomBot(bot))
         return false;
 
     std::list<GameObject*> targets;

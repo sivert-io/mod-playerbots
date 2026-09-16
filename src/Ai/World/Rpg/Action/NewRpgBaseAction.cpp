@@ -1115,7 +1115,8 @@ bool NewRpgBaseAction::RandomChangeStatus(std::vector<NewRpgStatus> candidateSta
     if (availableStatus.empty() || probSum == 0)
     {
         botAI->rpgInfo.ChangeToRest();
-        bot->SetStandState(UNIT_STAND_STATE_SIT);
+        if (!sPlayerbotAIConfig.idleSitEnable)
+            bot->SetStandState(UNIT_STAND_STATE_SIT);
         return true;
     }
     uint32 rand = urand(1, probSum);
@@ -1210,7 +1211,8 @@ bool NewRpgBaseAction::RandomChangeStatus(std::vector<NewRpgStatus> candidateSta
         case RPG_REST:
         {
             botAI->rpgInfo.ChangeToRest();
-            bot->SetStandState(UNIT_STAND_STATE_SIT);
+            if (!sPlayerbotAIConfig.idleSitEnable)
+                bot->SetStandState(UNIT_STAND_STATE_SIT);
             return true;
         }
         case RPG_OUTDOOR_PVP:
@@ -1233,7 +1235,8 @@ bool NewRpgBaseAction::RandomChangeStatus(std::vector<NewRpgStatus> candidateSta
         default:
         {
             botAI->rpgInfo.ChangeToRest();
-            bot->SetStandState(UNIT_STAND_STATE_SIT);
+            if (!sPlayerbotAIConfig.idleSitEnable)
+                bot->SetStandState(UNIT_STAND_STATE_SIT);
             return true;
         }
     }

@@ -619,6 +619,19 @@ private:
     Item* FindItemInInventory(std::function<bool(ItemTemplate const*)> checkItem) const;
     void HandleCommands();
     void HandleCommand(uint32 type, std::string const& text, Player& fromPlayer, const uint32 lang = LANG_UNIVERSAL);
+
+    // Idle posture: sit down after hanging around a while, stand before moving, dance in town now and then
+    void UpdateIdlePosture();
+    void SitDownIdle(bool inRestArea);
+    uint32 idleSinceMs = 0;
+    uint32 idleSpellRoll = 0;
+    float idleLastX = 0.0f;
+    float idleLastY = 0.0f;
+    ObjectGuid idleChair;
+    uint32 danceStartMs = 0;
+    uint32 danceDurationMs = 0;
+    uint32 lastDanceMs = 0;
+    uint32 lastDanceCheckMs = 0;
     inline bool IsValidUnit(Unit const* unit) const
     {
         return unit && unit->IsInWorld() && !unit->IsDuringRemoveFromWorld();
