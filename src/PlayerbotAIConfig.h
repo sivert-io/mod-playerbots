@@ -7,6 +7,7 @@
 #ifndef PLAYERBOTS_PLAYERBOTAICONFIG_H
 #define PLAYERBOTS_PLAYERBOTAICONFIG_H
 
+#include "ConfigReloadPolicy.h"
 #include "DBCEnums.h"
 #include "SharedDefines.h"
 #include <algorithm>
@@ -97,6 +98,8 @@ public:
     }
 
     bool Initialize();
+    // Re-reads the options that are safe to change at runtime (".reload config") and logs what changed
+    void Reload();
     void LoadRandomBotLevelConfig();
     bool IsInRandomAccountList(uint32 id);
     bool IsInRandomQuestItemList(uint32 id);
@@ -570,6 +573,10 @@ public:
     std::vector<std::string> resetBotLevelExcludeNames;
 
 private:
+    void LoadLiveOptions();
+    static ConfigReloadPolicy::Snapshot SnapshotConfig();
+    ConfigReloadPolicy::Snapshot reloadSnapshot;  // raw playerbots options as last applied
+
     PlayerbotAIConfig() = default;
     ~PlayerbotAIConfig() = default;
 

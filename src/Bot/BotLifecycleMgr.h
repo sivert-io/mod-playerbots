@@ -90,7 +90,19 @@ public:
     }
 
     void Init();
+    // Personas and sessions; runs on the random bot manager's AI tick
     void Update();
+    // Week plan, arrivals, DB re-scan and stats; runs every world tick (world thread), at most once a second
+    void UpdateArrivals();
+    // After ".reload config" applied new values (world thread). Re-plans the rest of the week when the plan
+    // keys changed; Cap and MaxPerHour act on the next arrival by themselves.
+    void OnConfigReloaded(bool arrivalPlanChanged, uint32 oldArrivalsPerYear);
+
+    // ".astro arrivals ..." (world thread). Each returns the lines to show; every change is logged.
+    std::vector<std::string> AdminStatus();
+    std::vector<std::string> AdminAddArrivals(uint32 count, uint32 hours, uint32 burstPerHour, std::string const& by);
+    std::vector<std::string> AdminSetRate(uint32 perHour, std::string const& by);
+    std::vector<std::string> AdminPause(bool pause, std::string const& by);
 
     bool IsActive() const { return initialized && sPlayerbotAIConfig.lifecycleEnabled; }
     bool HasPersona(uint32 guid) const;
@@ -146,6 +158,12 @@ private:
     // `count` arrival times in [max(from, now), weekStart + 7 days), spread like a weekly plan; perDay gets the day counts
     std::vector<uint32> DrawWeekSlots(uint32 weekStart, uint32 from, uint32 now, uint32 count, std::array<uint32, 7>& perDay);
     void ReloadPendingArrivals();
+    // Picks up pending rows other tools inserted (ids above the highest one already known)
+    void RescanNewArrivals();
+    void ReplanCurrentWeek(uint32 now, uint32 oldArrivalsPerYear);
+    // Accounts that can still be appended to randomBotAccounts without reallocating it (see Init)
+    size_t AccountHeadroom() const;
+    uint32 PendingCount() const { return uint32(pendingArrivals.size()) + (hasActiveArrival ? 1 : 0); }
     void SpreadArrivalBacklog(uint32 now);
     void ProcessArrivals(uint32 now);
     void FinishArrival(char const* status);
@@ -167,6 +185,10 @@ private:
     uint32 nextWeekCheck = 0;
     uint32 nextArrivalStep = 0;
     uint32 nextArrivalStats = 0;
+    uint32 nextArrivalRescan = 0;
+    uint32 lastArrivalTick = 0;
+    uint32 maxKnownArrivalId = 0;
+    bool arrivalsPaused = false;  // .astro arrivals pause, in memory until resume or restart
 
     std::mt19937 rng{std::random_device{}()};
 };
