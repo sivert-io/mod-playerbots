@@ -570,6 +570,21 @@ bool PlayerbotAIConfig::Initialize()
     enableNewRpgStrategy = sConfigMgr->GetOption<bool>("AiPlayerbot.EnableNewRpgStrategy", true);
 
 
+    idleSitEnable = sConfigMgr->GetOption<bool>("AiPlayerbot.IdleSit.Enable", true);
+    idleSitMinIdleMs = sConfigMgr->GetOption<uint32>("AiPlayerbot.IdleSit.MinIdleSeconds", 20) * IN_MILLISECONDS;
+    idleSitMaxIdleMs = std::max(idleSitMinIdleMs,
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.IdleSit.MaxIdleSeconds", 40) * IN_MILLISECONDS);
+    idleSitOpenWorldFactor = sConfigMgr->GetOption<uint32>("AiPlayerbot.IdleSit.OpenWorldFactor", 2);
+    idleSitChancePct = sConfigMgr->GetOption<uint32>("AiPlayerbot.IdleSit.SitChance", 75);
+    idleSitUseChairs = sConfigMgr->GetOption<bool>("AiPlayerbot.IdleSit.UseChairs", true);
+    idleDanceChancePct = sConfigMgr->GetOption<uint32>("AiPlayerbot.IdleSit.DanceChance", 3);
+    idleDanceMinMs = sConfigMgr->GetOption<uint32>("AiPlayerbot.IdleSit.DanceMinSeconds", 8) * IN_MILLISECONDS;
+    idleDanceMaxMs = std::max(idleDanceMinMs,
+        sConfigMgr->GetOption<uint32>("AiPlayerbot.IdleSit.DanceMaxSeconds", 25) * IN_MILLISECONDS);
+    idleDanceCooldownMs = sConfigMgr->GetOption<uint32>("AiPlayerbot.IdleSit.DanceCooldownSeconds", 600) * IN_MILLISECONDS;
+    rpgRestMinTime = sConfigMgr->GetOption<uint32>("AiPlayerbot.RpgRest.MinTime", 60);
+    rpgRestMaxTime = std::max(rpgRestMinTime, sConfigMgr->GetOption<uint32>("AiPlayerbot.RpgRest.MaxTime", 180));
+
     syncLevelWithPlayers = sConfigMgr->GetOption<bool>("AiPlayerbot.SyncLevelWithPlayers", false);
     randomBotConcentrateInPlayerZone =
         sConfigMgr->GetOption<bool>("AiPlayerbot.RandomBotConcentrateInPlayerZone", false);

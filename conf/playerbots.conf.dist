@@ -1658,6 +1658,30 @@ AiPlayerbot.RpgStatusProbWeight.SocialAfk = 0
 AiPlayerbot.RpgSocialAfk.MinTime = 300
 AiPlayerbot.RpgSocialAfk.MaxTime = 1800
 
+# Idle posture (Astro Realm): random bots hanging around sit down after a while instead of standing
+# still forever, pick a nearby chair or bench in towns and inns, stand up before they move, and dance
+# a little in town now and then. Bots grouped with a player mirror that player's posture instead.
+#   IdleSit.MinIdleSeconds/MaxIdleSeconds: standing time before sitting; every bot gets its own value
+#   IdleSit.OpenWorldFactor: outside towns and breaks wait this many times longer (no sitting mid-grind)
+#   IdleSit.SitChance: percent of idle spells that end in sitting; the rest just stand around
+#   IdleSit.DanceChance: percent per half-minute check, settled in a town; DanceCooldownSeconds between dances
+# 0 = off: bots never sit on their own and are stood up as before
+# Default: 1
+AiPlayerbot.IdleSit.Enable = 1
+AiPlayerbot.IdleSit.MinIdleSeconds = 20
+AiPlayerbot.IdleSit.MaxIdleSeconds = 40
+AiPlayerbot.IdleSit.OpenWorldFactor = 2
+AiPlayerbot.IdleSit.SitChance = 75
+AiPlayerbot.IdleSit.UseChairs = 1
+AiPlayerbot.IdleSit.DanceChance = 3
+AiPlayerbot.IdleSit.DanceMinSeconds = 8
+AiPlayerbot.IdleSit.DanceMaxSeconds = 25
+AiPlayerbot.IdleSit.DanceCooldownSeconds = 600
+
+# How long an RPG rest break lasts when IdleSit is on, in seconds (a 30 s break is too short to sit down)
+AiPlayerbot.RpgRest.MinTime = 60
+AiPlayerbot.RpgRest.MaxTime = 180
+
 # Bots' minimum and maximum level when teleporting in and out of a zone, according to the new RPG strategy
 # Format: AiPlayerbot.ZoneBracket.zoneID = minLevel,maxLevel
 #

@@ -193,6 +193,11 @@ bool PlayerbotSecurity::CheckLevelFor(PlayerbotSecurityLevel level, bool silent,
     if (silent || (fromBotAI && !IsSelfBot(from)) || reason == PLAYERBOT_DENY_NO_CONTROL)
         return false;
 
+    // Persona bots never whisper canned refusals ("Invite me to your group first", "You are too low level")
+    if (!PlayerbotControlPolicy::ExplainsDenials(sPlayerbotAIConfig.IsInRandomAccountList(account),
+                                                 from->CanBeGameMaster(), sPlayerbotAIConfig.randomBotPlayerControl))
+        return false;
+
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
     if (!botAI)
         return false;

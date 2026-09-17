@@ -5,7 +5,10 @@
 
 #include <cstdio>
 
+using PlayerbotControlPolicy::AcceptsChatCommands;
 using PlayerbotControlPolicy::AltBotRequest;
+using PlayerbotControlPolicy::ExplainsDenials;
+using PlayerbotControlPolicy::NameRevealsBot;
 using PlayerbotControlPolicy::CanAddAltBot;
 using PlayerbotControlPolicy::RandomBotObeysMaster;
 
@@ -82,6 +85,23 @@ int main()
     Expect(RandomBotObeysMaster(false, false), false, "player master cannot command persona bot");
     Expect(RandomBotObeysMaster(true, false), true, "GM can command persona bot");
     Expect(RandomBotObeysMaster(false, true), true, "before fix: player master could command random bot");
+
+    // Persona bots do not treat what people type as commands, and do not explain refusals
+    Expect(AcceptsChatCommands(true, false, false, false), false, "persona bot ignores 'who'/'wts' from a player");
+    Expect(AcceptsChatCommands(true, true, false, false), true, "GM can still command a persona bot");
+    Expect(AcceptsChatCommands(true, false, true, false), true, "a bot's own internal commands still run");
+    Expect(AcceptsChatCommands(true, false, false, true), true, "upstream control setting restores commands");
+    Expect(AcceptsChatCommands(false, false, false, false), true, "a player's own alt bots take commands");
+    Expect(ExplainsDenials(true, false, false), false, "persona bot never whispers 'Invite me to your group first'");
+    Expect(ExplainsDenials(true, true, false), true, "GM gets the explanation");
+    Expect(ExplainsDenials(false, false, false), true, "alt bots still explain themselves to their owner");
+
+    // Names from the pool that give the game away
+    Expect(NameRevealsBot("Botrag"), true, "Botrag reveals a bot");
+    Expect(NameRevealsBot("Kaidzubot"), true, "Kaidzubot reveals a bot");
+    Expect(NameRevealsBot("HIMEBOTUP"), true, "case does not hide it");
+    Expect(NameRevealsBot("Brunhild"), false, "ordinary name passes");
+    Expect(NameRevealsBot("Bo"), false, "short name passes");
 
     std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
     return failures ? 1 : 0;
