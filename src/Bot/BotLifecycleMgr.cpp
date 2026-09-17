@@ -959,7 +959,7 @@ void BotLifecycleMgr::FinishArrival(char const* status)
 
 void BotLifecycleMgr::ProcessArrivals(uint32 now)
 {
-    if (now < nextArrivalStep)
+    if (now < nextArrivalStep || (arrivalsPaused && !hasActiveArrival))
         return;
 
     if (!hasActiveArrival)
@@ -1353,6 +1353,8 @@ std::vector<std::string> BotLifecycleMgr::AdminStatus()
         uint32 const at = std::max(pendingArrivals.front().second, nextArrivalStep);
         next = LocalTimeStr(at) + (at > now ? " (in " + std::to_string((at - now + 59) / 60) + " min)" : " (due)");
     }
+    if (arrivalsPaused)
+        lines.push_back("PAUSED: no new arrivals start until .astro arrivals resume (or a restart)");
     lines.push_back("Pending " + std::to_string(PendingCount()) + " (" + (sources.tellp() > 0 ? sources.str() : "none in DB") +
                     "), due now " + std::to_string(due) + ", next " + next);
 
@@ -1497,5 +1499,19 @@ std::vector<std::string> BotLifecycleMgr::AdminSetRate(uint32 perHour, std::stri
                     (perHour ? std::to_string(perHour) : std::string("off")) +
                     " until the next .reload config (set AiPlayerbot.Arrivals.MaxPerHour to keep it)");
     LOG_INFO("playerbots", "Arrivals admin: {} set MaxPerHour {} -> {}", by, old, perHour);
+    return lines;
+}
+
+std::vector<std::string> BotLifecycleMgr::AdminPause(bool pause, std::string const& by)
+{
+    std::vector<std::string> lines;
+    bool const was = arrivalsPaused;
+    arrivalsPaused = pause;
+    if (!pause && !hasActiveArrival)
+        nextArrivalStep = std::min(nextArrivalStep, Now());
+    lines.push_back(pause ? (was ? "Arrivals were already paused" : "Arrivals paused (the one being created finishes)")
+                          : (was ? "Arrivals resumed, overdue rows start one by one within MaxPerHour"
+                                 : "Arrivals were not paused"));
+    LOG_INFO("playerbots", "Arrivals admin: {} {} arrivals ({} pending)", by, pause ? "paused" : "resumed", PendingCount());
     return lines;
 }

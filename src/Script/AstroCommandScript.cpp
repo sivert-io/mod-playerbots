@@ -8,6 +8,7 @@
 //   .astro arrivals status
 //   .astro arrivals add <count> [over <hours>] [rate <perHour>]
 //   .astro arrivals rate <perHour>
+//   .astro arrivals pause | resume
 
 #include "BotLifecycleMgr.h"
 #include "Chat.h"
@@ -60,6 +61,8 @@ public:
             {"status", HandleStatus, SEC_GAMEMASTER, Console::Yes},
             {"add", HandleAdd, SEC_GAMEMASTER, Console::Yes},
             {"rate", HandleRate, SEC_GAMEMASTER, Console::Yes},
+            {"pause", HandlePause, SEC_GAMEMASTER, Console::Yes},
+            {"resume", HandleResume, SEC_GAMEMASTER, Console::Yes},
         };
         static ChatCommandTable astroTable = {
             {"arrivals", arrivalsTable},
@@ -118,6 +121,18 @@ public:
         }
 
         Print(handler, sBotLifecycleMgr.AdminSetRate(rate, Actor(handler)));
+        return true;
+    }
+
+    static bool HandlePause(ChatHandler* handler, char const* /*args*/)
+    {
+        Print(handler, sBotLifecycleMgr.AdminPause(true, Actor(handler)));
+        return true;
+    }
+
+    static bool HandleResume(ChatHandler* handler, char const* /*args*/)
+    {
+        Print(handler, sBotLifecycleMgr.AdminPause(false, Actor(handler)));
         return true;
     }
 };

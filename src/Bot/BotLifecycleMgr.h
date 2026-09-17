@@ -102,6 +102,7 @@ public:
     std::vector<std::string> AdminStatus();
     std::vector<std::string> AdminAddArrivals(uint32 count, uint32 hours, uint32 burstPerHour, std::string const& by);
     std::vector<std::string> AdminSetRate(uint32 perHour, std::string const& by);
+    std::vector<std::string> AdminPause(bool pause, std::string const& by);
 
     bool IsActive() const { return initialized && sPlayerbotAIConfig.lifecycleEnabled; }
     bool HasPersona(uint32 guid) const;
@@ -187,6 +188,7 @@ private:
     uint32 nextArrivalRescan = 0;
     uint32 lastArrivalTick = 0;
     uint32 maxKnownArrivalId = 0;
+    bool arrivalsPaused = false;  // .astro arrivals pause, in memory until resume or restart
 
     std::mt19937 rng{std::random_device{}()};
 };
