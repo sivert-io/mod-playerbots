@@ -7,7 +7,9 @@
 #include "BotLifecycleMgr.h"
 
 #include "AccountMgr.h"
+#include "ArrivalSlots.h"
 #include "CharacterCache.h"
+#include "Config.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Log.h"
@@ -20,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <ctime>
+#include <map>
 #include <mutex>
 #include <sstream>
 
@@ -34,44 +37,11 @@ constexpr uint32 WEEK_CHECK_INTERVAL = 10 * MINUTE;
 constexpr uint32 MIN_OFFLINE_GAP = 45 * MINUTE;
 constexpr uint32 PLAN_GRACE = WEEK_CHECK_INTERVAL + 5 * MINUTE;  // a week planned this soon after it began is planned whole
 constexpr uint32 ARRIVAL_STATS_INTERVAL = 30 * MINUTE;
+constexpr uint32 ARRIVAL_RESCAN_INTERVAL = 2 * MINUTE;  // rows inserted by other tools start within this
+constexpr uint32 ARRIVAL_INSERT_CHUNK = 200;
 
-// HourWeights curve: linear between points, wrapping around midnight
-float HourWeightAt(std::vector<std::pair<float, float>> const& points, float hour)
-{
-    if (points.empty())
-        return 1.0f;
-    std::pair<float, float> prev = points.back();
-    prev.first -= 24.0f;
-    std::pair<float, float> next = points.front();
-    next.first += 24.0f;
-    for (auto const& point : points)
-    {
-        if (point.first <= hour)
-            prev = point;
-        else
-        {
-            next = point;
-            break;
-        }
-    }
-    float weight = prev.second;
-    if (next.first > prev.first)
-        weight += (next.second - prev.second) * (hour - prev.first) / (next.first - prev.first);
-    return std::max(0.0f, weight);
-}
-
-// Integral of the HourWeights curve over [from, to] hours (trapezoids of at most 3 minutes)
-float HourMass(std::vector<std::pair<float, float>> const& points, float from, float to)
-{
-    if (to <= from)
-        return 0.0f;
-    uint32 const steps = std::max<uint32>(1, uint32(std::ceil((to - from) / 0.05f)));
-    float const width = (to - from) / steps;
-    float mass = 0.0f;
-    for (uint32 i = 0; i < steps; ++i)
-        mass += (HourWeightAt(points, from + i * width) + HourWeightAt(points, from + (i + 1) * width)) * 0.5f * width;
-    return mass;
-}
+using ArrivalSlots::HourMass;
+using ArrivalSlots::HourWeightAt;
 
 uint32 StochasticRound(float value)
 {
@@ -175,6 +145,17 @@ void BotLifecycleMgr::CreateTables()
         "KEY `idx_status_time` (`status`, `scheduled_at`),"
         "KEY `idx_week` (`week_start`)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Astro Realm: planned and completed bot arrivals'");
+
+    // Who created a row: 'plan' (weekly plan), 'admin' (.astro arrivals add) or anything another tool sets.
+    // Only 'plan' rows count towards and are re-planned with the weekly budget. Older builds insert without
+    // the column and get 'plan', which is what they are.
+    if (!PlayerbotsDatabase.Query("SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
+                                  "AND TABLE_NAME = 'astro_bot_arrivals' AND COLUMN_NAME = 'source'"))
+    {
+        PlayerbotsDatabase.DirectExecute(
+            "ALTER TABLE `astro_bot_arrivals` ADD COLUMN `source` VARCHAR(16) NOT NULL DEFAULT 'plan' AFTER `status`");
+        LOG_INFO("server.loading", ">> Arrivals: added astro_bot_arrivals.source");
+    }
 
     PlayerbotsDatabase.DirectExecute(
         "CREATE TABLE IF NOT EXISTS `astro_bot_arrival_weeks` ("
@@ -807,7 +788,7 @@ void BotLifecycleMgr::EnsureWeekPlan(uint32 now)
     if (QueryResult result = PlayerbotsDatabase.Query(
             "SELECT COUNT(*), CAST(COALESCE(SUM(status <> 'empty'), 0) AS UNSIGNED), "
             "CAST(COALESCE(SUM(status IN ('pending', 'creating')), 0) AS UNSIGNED) "
-            "FROM astro_bot_arrivals WHERE week_start = {}", weekStart))
+            "FROM astro_bot_arrivals WHERE week_start = {} AND source = 'plan'", weekStart))
     {
         Field* f = result->Fetch();
         rowsAll = uint32(f[0].Get<uint64>());
@@ -830,9 +811,9 @@ void BotLifecycleMgr::EnsureWeekPlan(uint32 now)
     if (!times.empty())
     {
         std::ostringstream sql;
-        sql << "INSERT INTO astro_bot_arrivals (week_start, scheduled_at, status) VALUES ";
+        sql << "INSERT INTO astro_bot_arrivals (week_start, scheduled_at, status, source) VALUES ";
         for (size_t i = 0; i < times.size(); ++i)
-            sql << (i ? "," : "") << "(" << weekStart << "," << times[i] << ",'pending')";
+            sql << (i ? "," : "") << "(" << weekStart << "," << times[i] << ",'pending','plan')";
         PlayerbotsDatabase.DirectExecute(sql.str());
     }
     else if (!rowsAll)
@@ -847,7 +828,8 @@ void BotLifecycleMgr::EnsureWeekPlan(uint32 now)
     std::array<uint32, 7> perDay{};
     uint32 rows = 0, first = 0, last = 0;
     if (QueryResult result = PlayerbotsDatabase.Query(
-            "SELECT scheduled_at FROM astro_bot_arrivals WHERE week_start = {} AND status <> 'empty' ORDER BY scheduled_at",
+            "SELECT scheduled_at FROM astro_bot_arrivals WHERE week_start = {} AND status <> 'empty' AND source = 'plan' "
+            "ORDER BY scheduled_at",
             weekStart))
     {
         do
@@ -889,6 +871,7 @@ void BotLifecycleMgr::ReloadPendingArrivals()
         {
             Field* fields = result->Fetch();
             uint32 const id = fields[0].Get<uint32>();
+            maxKnownArrivalId = std::max(maxKnownArrivalId, id);
             if (hasActiveArrival && id == activeArrival.rowId)
                 continue;  // its 'creating' update may still be queued
             pendingArrivals.emplace_back(id, fields[1].Get<uint32>());
@@ -994,9 +977,18 @@ void BotLifecycleMgr::ProcessArrivals(uint32 now)
             return;
         }
 
-        activeArrival = PendingArrival();
-        activeArrival.rowId = pendingArrivals.front().first;
+        // Another tool may have cancelled or taken the row since it was loaded
+        uint32 const rowId = pendingArrivals.front().first;
         pendingArrivals.pop_front();
+        QueryResult row = PlayerbotsDatabase.Query("SELECT status FROM astro_bot_arrivals WHERE id = {}", rowId);
+        if (!row || row->Fetch()[0].Get<std::string>() != "pending")
+        {
+            LOG_INFO("playerbots", "Arrivals: row {} is no longer pending, skipped", rowId);
+            return;
+        }
+
+        activeArrival = PendingArrival();
+        activeArrival.rowId = rowId;
         hasActiveArrival = true;
 
         size_t total;
@@ -1004,7 +996,8 @@ void BotLifecycleMgr::ProcessArrivals(uint32 now)
             std::shared_lock lock(personaLock);
             total = personas.size();
         }
-        if (total >= sPlayerbotAIConfig.arrivalsCap)
+        // No headroom left means the account list would reallocate under readers: stop like the cap does
+        if (total >= sPlayerbotAIConfig.arrivalsCap || !AccountHeadroom())
         {
             FinishArrival("capped");
             return;
@@ -1139,13 +1132,28 @@ void BotLifecycleMgr::Update()
         MaintainPersonas(now);
     }
 
-    if (!sPlayerbotAIConfig.arrivalsEnabled)
+}
+
+void BotLifecycleMgr::UpdateArrivals()
+{
+    if (!IsActive() || !sPlayerbotAIConfig.arrivalsEnabled)
         return;
+
+    uint32 const now = Now();
+    if (now == lastArrivalTick)
+        return;
+    lastArrivalTick = now;
 
     if (now >= nextWeekCheck)
     {
         nextWeekCheck = now + WEEK_CHECK_INTERVAL;
         EnsureWeekPlan(now);
+    }
+
+    if (now >= nextArrivalRescan)
+    {
+        nextArrivalRescan = now + ARRIVAL_RESCAN_INTERVAL;
+        RescanNewArrivals();
     }
 
     ProcessArrivals(now);
@@ -1155,4 +1163,339 @@ void BotLifecycleMgr::Update()
         nextArrivalStats = now + ARRIVAL_STATS_INTERVAL;
         LogArrivalStats(now);
     }
+}
+
+size_t BotLifecycleMgr::AccountHeadroom() const
+{
+    auto const& accounts = sPlayerbotAIConfig.randomBotAccounts;
+    return accounts.capacity() > accounts.size() ? accounts.capacity() - accounts.size() : 0;
+}
+
+void BotLifecycleMgr::RescanNewArrivals()
+{
+    QueryResult result = PlayerbotsDatabase.Query(
+        "SELECT id, scheduled_at, source FROM astro_bot_arrivals WHERE status = 'pending' AND id > {} ORDER BY id",
+        maxKnownArrivalId);
+    if (!result)
+        return;
+
+    uint32 added = 0;
+    std::map<std::string, uint32> sources;
+    do
+    {
+        Field* f = result->Fetch();
+        uint32 const id = f[0].Get<uint32>();
+        uint32 const at = f[1].Get<uint32>();
+        maxKnownArrivalId = std::max(maxKnownArrivalId, id);
+        if ((hasActiveArrival && id == activeArrival.rowId) ||
+            std::any_of(pendingArrivals.begin(), pendingArrivals.end(), [id](auto const& p) { return p.first == id; }))
+            continue;
+
+        auto const pos = std::upper_bound(pendingArrivals.begin(), pendingArrivals.end(), at,
+                                          [](uint32 value, auto const& p) { return value < p.second; });
+        pendingArrivals.insert(pos, {id, at});
+        ++sources[f[2].Get<std::string>()];
+        ++added;
+    } while (result->NextRow());
+
+    if (!added)
+        return;
+
+    std::ostringstream by;
+    for (auto const& [source, count] : sources)
+        by << (by.tellp() > 0 ? ", " : "") << source << " " << count;
+    LOG_INFO("playerbots", "Arrivals: picked up {} new pending rows from the database ({}), {} pending, next {}", added,
+             by.str(), PendingCount(), LocalTimeStr(pendingArrivals.front().second));
+}
+
+void BotLifecycleMgr::OnConfigReloaded(bool arrivalPlanChanged, uint32 oldArrivalsPerYear)
+{
+    if (!IsActive() || !sPlayerbotAIConfig.arrivalsEnabled)
+        return;
+
+    uint32 const now = Now();
+
+    // Personas can only grow as far as this run reserved account slots for (Init)
+    size_t personaCount;
+    {
+        std::shared_lock lock(personaLock);
+        personaCount = personas.size();
+    }
+    size_t const reachable = personaCount + AccountHeadroom() + (hasActiveArrival ? 1 : 0);
+    if (sPlayerbotAIConfig.arrivalsCap > reachable)
+    {
+        LOG_WARN("playerbots", "Arrivals: Cap {} is above the {} bots this run reserved room for; using {} until a restart",
+                 sPlayerbotAIConfig.arrivalsCap, reachable, reachable);
+        sPlayerbotAIConfig.arrivalsCap = uint32(reachable);
+    }
+
+    // A wait for the old MaxPerHour may no longer apply
+    if (!hasActiveArrival)
+        nextArrivalStep = std::min(nextArrivalStep, now);
+
+    if (arrivalPlanChanged)
+        ReplanCurrentWeek(now, oldArrivalsPerYear);
+}
+
+// The rest of the current week with the reloaded PerYear, DayShape, WeekdayWeights, HourWeights and
+// ScaleMidWeek. Idempotent: the pending 'plan' rows of the week get new times, then rows are added or marked
+// 'dropped' to reach the new remaining budget. Done, failed, capped and creating rows and rows from other
+// sources are never touched, so reloading twice with the same values keeps the same number of rows.
+void BotLifecycleMgr::ReplanCurrentWeek(uint32 now, uint32 oldArrivalsPerYear)
+{
+    uint32 const weekStart = GetWeekStart(now);
+    QueryResult week = PlayerbotsDatabase.Query(
+        "SELECT week_budget FROM astro_bot_arrival_weeks WHERE week_start = {}", weekStart);
+    if (!week)
+        return;  // not planned yet: the next week check plans it with the new values
+
+    // Keep the week's own +-15% draw: its budget relative to the PerYear it was planned with
+    float const oldFullWeek = oldArrivalsPerYear * 7.0f / 365.25f;
+    float const draw = oldFullWeek > 0.0f ? std::clamp(week->Fetch()[0].Get<float>() / oldFullWeek, 0.85f, 1.15f) : 1.0f;
+    float const weekBudget = sPlayerbotAIConfig.arrivalsPerYear * 7.0f / 365.25f * draw;
+
+    std::vector<uint32> pendingIds;
+    uint32 started = 0;
+    if (QueryResult result = PlayerbotsDatabase.Query(
+            "SELECT id, status FROM astro_bot_arrivals WHERE week_start = {} AND source = 'plan' "
+            "AND status NOT IN ('empty', 'dropped')", weekStart))
+    {
+        do
+        {
+            Field* f = result->Fetch();
+            uint32 const id = f[0].Get<uint32>();
+            if (f[1].Get<std::string>() == "pending" && !(hasActiveArrival && id == activeArrival.rowId))
+                pendingIds.push_back(id);
+            else
+                ++started;
+        } while (result->NextRow());
+    }
+
+    float share = 1.0f;
+    uint32 target;
+    if (sPlayerbotAIConfig.arrivalsScaleMidWeek)
+    {
+        share = RemainingWeekShare(weekStart, now);
+        target = uint32(std::lround(weekBudget * share));
+    }
+    else
+    {
+        uint32 const whole = uint32(std::lround(weekBudget));
+        target = whole > started ? whole - started : 0;
+    }
+
+    ArrivalSlots::Replan const delta = ArrivalSlots::PlanDelta(uint32(pendingIds.size()), target);
+    std::array<uint32, 7> perDay{};
+    std::vector<uint32> const times = DrawWeekSlots(weekStart, now, now, target, perDay);
+    std::shuffle(pendingIds.begin(), pendingIds.end(), rng);
+
+    PlayerbotsDatabaseTransaction trans = PlayerbotsDatabase.BeginTransaction();
+    for (uint32 i = 0; i < delta.reschedule; ++i)
+        trans->Append("UPDATE astro_bot_arrivals SET scheduled_at = {} WHERE id = {} AND status = 'pending'", times[i],
+                      pendingIds[i]);
+    for (uint32 i = delta.reschedule; i < delta.reschedule + delta.drop; ++i)
+        trans->Append("UPDATE astro_bot_arrivals SET status = 'dropped' WHERE id = {} AND status = 'pending'", pendingIds[i]);
+    for (uint32 i = delta.reschedule; i < times.size(); i += ARRIVAL_INSERT_CHUNK)
+    {
+        std::ostringstream sql;
+        sql << "INSERT INTO astro_bot_arrivals (week_start, scheduled_at, status, source) VALUES ";
+        for (uint32 j = i; j < std::min<uint32>(uint32(times.size()), i + ARRIVAL_INSERT_CHUNK); ++j)
+            sql << (j > i ? "," : "") << "(" << weekStart << "," << times[j] << ",'pending','plan')";
+        trans->Append(sql.str().c_str());
+    }
+    trans->Append("UPDATE astro_bot_arrival_weeks SET plan = 'replanned', week_budget = {:.2f}, share = {:.4f}, "
+                  "budget = {} WHERE week_start = {}", weekBudget, share, target, weekStart);
+    PlayerbotsDatabase.DirectCommitTransaction(trans);
+
+    ReloadPendingArrivals();
+    if (!hasActiveArrival)
+        nextArrivalStep = std::min(nextArrivalStep, now);
+
+    std::ostringstream days;
+    for (uint32 d = 0; d < 7; ++d)
+        days << (d ? " " : "") << perDay[d];
+    LOG_INFO("playerbots",
+             "Arrivals: week of {} re-planned after config reload: PerYear {} -> {}, {:.1f}% of the week ahead, "
+             "remaining budget {} (was {} pending): {} moved, {} added, {} dropped; Mon..Sun {}; {} pending",
+             LocalTimeStr(weekStart), oldArrivalsPerYear, sPlayerbotAIConfig.arrivalsPerYear, share * 100.0f, target,
+             pendingIds.size(), delta.reschedule, delta.insert, delta.drop, days.str(), PendingCount());
+}
+
+std::vector<std::string> BotLifecycleMgr::AdminStatus()
+{
+    std::vector<std::string> lines;
+    if (!IsActive() || !sPlayerbotAIConfig.arrivalsEnabled)
+    {
+        lines.push_back("Arrivals are off (AiPlayerbot.Lifecycle.Enable and AiPlayerbot.Arrivals.Enable, restart)");
+        return lines;
+    }
+
+    uint32 const now = Now();
+    std::ostringstream sources;
+    if (QueryResult result = PlayerbotsDatabase.Query(
+            "SELECT source, COUNT(*) FROM astro_bot_arrivals WHERE status = 'pending' GROUP BY source ORDER BY source"))
+    {
+        do
+        {
+            Field* f = result->Fetch();
+            sources << (sources.tellp() > 0 ? ", " : "") << f[0].Get<std::string>() << " " << f[1].Get<uint64>();
+        } while (result->NextRow());
+    }
+
+    size_t due = 0;
+    for (auto const& pending : pendingArrivals)
+        due += pending.second <= now;
+    std::string next = "-";
+    if (hasActiveArrival)
+        next = "being created now";
+    else if (!pendingArrivals.empty())
+    {
+        uint32 const at = std::max(pendingArrivals.front().second, nextArrivalStep);
+        next = LocalTimeStr(at) + (at > now ? " (in " + std::to_string((at - now + 59) / 60) + " min)" : " (due)");
+    }
+    lines.push_back("Pending " + std::to_string(PendingCount()) + " (" + (sources.tellp() > 0 ? sources.str() : "none in DB") +
+                    "), due now " + std::to_string(due) + ", next " + next);
+
+    std::map<std::string, uint64> week;
+    if (QueryResult result = PlayerbotsDatabase.Query(
+            "SELECT status, COUNT(*) FROM astro_bot_arrivals WHERE week_start = {} GROUP BY status", GetWeekStart(now)))
+    {
+        do
+        {
+            Field* f = result->Fetch();
+            week[f[0].Get<std::string>()] = f[1].Get<uint64>();
+        } while (result->NextRow());
+    }
+    uint64 allDone = 0;
+    if (QueryResult result = PlayerbotsDatabase.Query("SELECT COUNT(*) FROM astro_bot_arrivals WHERE status = 'done'"))
+        allDone = result->Fetch()[0].Get<uint64>();
+    lines.push_back("Week of " + LocalTimeStr(GetWeekStart(now)) + ": done " + std::to_string(week["done"]) + ", failed " +
+                    std::to_string(week["failed"]) + ", capped " + std::to_string(week["capped"]) + ", dropped " +
+                    std::to_string(week["dropped"]) + "; done all time " + std::to_string(allDone));
+
+    while (!recentArrivalStarts.empty() && recentArrivalStarts.front() + HOUR <= now)
+        recentArrivalStarts.pop_front();
+    uint32 const configured = uint32(std::max(0, sConfigMgr->GetOption<int32>("AiPlayerbot.Arrivals.MaxPerHour", 8, false)));
+    uint32 const perHour = sPlayerbotAIConfig.arrivalsMaxPerHour;
+    lines.push_back("Rate: " + std::to_string(recentArrivalStarts.size()) + " started in the last hour, MaxPerHour " +
+                    (perHour ? std::to_string(perHour) : std::string("off")) +
+                    (perHour != configured ? " (set live, config " + std::to_string(configured) + ")" : "") +
+                    ", at most about " + std::to_string(HOUR / (ARRIVAL_SPACING + 2 * ARRIVAL_STEP_DELAY + 2)) +
+                    " per hour with the arrival spacing");
+
+    size_t personaCount;
+    {
+        std::shared_lock lock(personaLock);
+        personaCount = personas.size();
+    }
+    lines.push_back("Personas " + std::to_string(personaCount) + ", Cap " + std::to_string(sPlayerbotAIConfig.arrivalsCap) +
+                    ", room for " + std::to_string(AccountHeadroom()) + " more accounts this run, PerYear " +
+                    std::to_string(sPlayerbotAIConfig.arrivalsPerYear));
+    lines.push_back("Lifecycle: " + GetStatsLine(now));
+    return lines;
+}
+
+std::vector<std::string> BotLifecycleMgr::AdminAddArrivals(uint32 count, uint32 hours, uint32 burstPerHour,
+                                                           std::string const& by)
+{
+    std::vector<std::string> lines;
+    if (!IsActive() || !sPlayerbotAIConfig.arrivalsEnabled)
+    {
+        lines.push_back("Arrivals are off (AiPlayerbot.Lifecycle.Enable and AiPlayerbot.Arrivals.Enable, restart)");
+        return lines;
+    }
+    if (!count || count > 5000 || !hours || hours > 14 * 24)
+    {
+        lines.push_back("Count must be 1..5000 and hours 1..336");
+        return lines;
+    }
+
+    size_t personaCount;
+    {
+        std::shared_lock lock(personaLock);
+        personaCount = personas.size();
+    }
+    uint32 const pending = PendingCount();
+    if (personaCount + pending + count > sPlayerbotAIConfig.arrivalsCap)
+    {
+        lines.push_back("Not added: " + std::to_string(personaCount) + " personas + " + std::to_string(pending) +
+                        " pending + " + std::to_string(count) + " would pass AiPlayerbot.Arrivals.Cap " +
+                        std::to_string(sPlayerbotAIConfig.arrivalsCap) + " (raise it and .reload config)");
+        return lines;
+    }
+    if (pending + count > AccountHeadroom())
+    {
+        lines.push_back("Not added: this run reserved room for " + std::to_string(AccountHeadroom()) +
+                        " more bot accounts and " + std::to_string(pending) + " are already pending (needs a restart)");
+        return lines;
+    }
+
+    uint32 const now = Now();
+    uint32 const start = now + MINUTE;
+    uint32 const end = now + hours * HOUR;
+    std::vector<uint32> const times = ArrivalSlots::DrawWindow(
+        start, end, count, sPlayerbotAIConfig.arrivalsHourPoints,
+        [](uint32 t) { return RandomPlayerbotMgr::GetPopulationLocalHour(time_t(t)); }, rng);
+
+    PlayerbotsDatabaseTransaction trans = PlayerbotsDatabase.BeginTransaction();
+    for (size_t i = 0; i < times.size(); i += ARRIVAL_INSERT_CHUNK)
+    {
+        std::ostringstream sql;
+        sql << "INSERT INTO astro_bot_arrivals (week_start, scheduled_at, status, source) VALUES ";
+        for (size_t j = i; j < std::min(times.size(), i + ARRIVAL_INSERT_CHUNK); ++j)
+            sql << (j > i ? "," : "") << "(" << GetWeekStart(times[j]) << "," << times[j] << ",'pending','admin')";
+        trans->Append(sql.str().c_str());
+    }
+    PlayerbotsDatabase.DirectCommitTransaction(trans);
+    ReloadPendingArrivals();
+
+    if (burstPerHour)
+        sPlayerbotAIConfig.arrivalsMaxPerHour = burstPerHour;
+    if (!hasActiveArrival)
+        nextArrivalStep = std::min(nextArrivalStep, now);
+
+    std::vector<uint32> window;
+    for (auto const& p : pendingArrivals)
+        if (p.second < end)
+            window.push_back(p.second);
+    uint32 const peakAdded = ArrivalSlots::PeakPerHour(times);
+    uint32 const peakAll = ArrivalSlots::PeakPerHour(window);
+
+    lines.push_back("Added " + std::to_string(count) + " arrivals between " + LocalTimeStr(times.front()) + " and " +
+                    LocalTimeStr(times.back()) + ", busiest hour " + std::to_string(peakAdded) + " (" +
+                    std::to_string(peakAll) + " with the other pending rows); " + std::to_string(PendingCount()) +
+                    " pending");
+    uint32 const perHour = sPlayerbotAIConfig.arrivalsMaxPerHour;
+    if (burstPerHour)
+        lines.push_back("MaxPerHour set to " + std::to_string(burstPerHour) + " until the next .reload config");
+    if (perHour && peakAll > perHour)
+        lines.push_back("MaxPerHour " + std::to_string(perHour) + " is below the busiest hour (" + std::to_string(peakAll) +
+                        "): arrivals will queue and run late. Raise it with .astro arrivals rate <n> or "
+                        "AiPlayerbot.Arrivals.MaxPerHour and .reload config");
+
+    LOG_INFO("playerbots", "Arrivals admin: {} added {} arrivals over {} h ({} to {}), busiest hour {}, MaxPerHour {}{}",
+             by, count, hours, LocalTimeStr(times.front()), LocalTimeStr(times.back()), peakAll, perHour,
+             burstPerHour ? " (set by this command)" : "");
+    return lines;
+}
+
+std::vector<std::string> BotLifecycleMgr::AdminSetRate(uint32 perHour, std::string const& by)
+{
+    std::vector<std::string> lines;
+    if (!IsActive() || !sPlayerbotAIConfig.arrivalsEnabled)
+    {
+        lines.push_back("Arrivals are off (AiPlayerbot.Lifecycle.Enable and AiPlayerbot.Arrivals.Enable, restart)");
+        return lines;
+    }
+
+    uint32 const old = sPlayerbotAIConfig.arrivalsMaxPerHour;
+    sPlayerbotAIConfig.arrivalsMaxPerHour = perHour;
+    if (!hasActiveArrival)
+        nextArrivalStep = std::min(nextArrivalStep, Now());
+
+    lines.push_back("MaxPerHour " + (old ? std::to_string(old) : std::string("off")) + " -> " +
+                    (perHour ? std::to_string(perHour) : std::string("off")) +
+                    " until the next .reload config (set AiPlayerbot.Arrivals.MaxPerHour to keep it)");
+    LOG_INFO("playerbots", "Arrivals admin: {} set MaxPerHour {} -> {}", by, old, perHour);
+    return lines;
 }

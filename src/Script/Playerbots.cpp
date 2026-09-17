@@ -5,8 +5,10 @@
  */
 
 #include "Playerbots.h"
+
 #include "BattleGroundTactics.h"
 #include "BattlefieldScript.h"
+#include "BotLifecycleMgr.h"
 #include "Channel.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
@@ -331,8 +333,17 @@ class PlayerbotsWorldScript : public WorldScript
 public:
     PlayerbotsWorldScript() : WorldScript("PlayerbotsWorldScript", {
         WORLDHOOK_ON_BEFORE_WORLD_INITIALIZED,
-        WORLDHOOK_ON_UPDATE
+        WORLDHOOK_ON_UPDATE,
+        WORLDHOOK_ON_AFTER_CONFIG_LOAD
     }) {}
+
+    // ".reload config": the core has already re-read playerbots.conf. The first (startup) call happens
+    // before Initialize(), which loads everything itself.
+    void OnAfterConfigLoad(bool reload) override
+    {
+        if (reload)
+            sPlayerbotAIConfig.Reload();
+    }
 
     void OnBeforeWorldInitialized() override
     {
@@ -370,6 +381,7 @@ public:
     {
         PlayerbotWorldThreadProcessor::instance().Update(diff);
         sRandomPlayerbotMgr.UpdateAI(diff);  // World thread only
+        sBotLifecycleMgr.UpdateArrivals();   // every world tick, not only on the random bot manager's AI tick
     }
 };
 
@@ -511,6 +523,7 @@ public:
     PlayerbotsBattlefieldScript() : BattlefieldScript("PlayerbotsBattlefieldScript") { }
 };
 
+void AddAstroCommandScripts();
 void AddPlayerbotsSecureLoginScripts();
 void AddPlayerbotsSelfBotAfkScripts();
 
@@ -534,6 +547,7 @@ void AddPlayerbotsScripts()
     AddPlayerbotsSecureLoginScripts();
     AddPlayerbotsSelfBotAfkScripts();
     AddPlayerbotsCommandscripts();
+    AddAstroCommandScripts();
     PlayerBotsGuildValidationScript();
     AddSC_MagtheridonBotScripts();
     AddSC_TempestKeepBotScripts();
